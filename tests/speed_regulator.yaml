@@ -1,0 +1,70 @@
+suite:
+  name: "Speed_Regulator_Validation"
+  version: "1.0"
+  author: ""
+  description: "Observe P-controller behavior across sequential setpoint phases"
+  dut: "STM32F401RETx — SHIL_PERIPH_TESTING"
+
+config:
+  port: "/dev/serial0"
+  baud: 115200
+  loop_period_ms: 10          # STM32 TIM11 control loop period — do not change
+  capture_interval_ms: 100    # how often a data row is logged
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+
+  # Embedded motor model parameters
+  motor:
+    tau_ms: 100               # inertia time constant (ms)
+    delay_ms: 250             # transport delay (ms)
+    k_drag: 0.0               # drag coefficient
+
+test_cases:
+
+  - id: TC_001
+    name: "Multi_Step_Setpoint_Ramp"
+    description: >
+      Vehicle starts at 10 km/h. Setpoint jumps to 100 km/h for 3 s,
+      then to 160 km/h for 3 s. Observe convergence behavior at each phase.
+    initial_vv: 10
+
+    phases:
+      - vset: 100
+        duration_ms: 3000
+        assert_end:
+          vv_min: 85
+          vv_max: 105
+
+      - vset: 160
+        duration_ms: 3000
+        assert_end:
+          vv_min: 140
+          vv_max: 165
+
+  - id: TC_002
+    name: "Deceleration_Check"
+    description: >
+      Vehicle at 150 km/h, setpoint drops to 50 km/h.
+      Controller should output negative command (braking).
+    initial_vv: 150
+
+    phases:
+      - vset: 50
+        duration_ms: 3000
+        assert_end:
+          vv_min: 40
+          vv_max: 60
+
+  - id: TC_003
+    name: "Saturation_Verification"
+    description: >
+      From rest, full setpoint 255. Controller must saturate at +500 immediately.
+      Observed for 500 ms only.
+    initial_vv: 0
+
+    phases:
+      - vset: 255
+        duration_ms: 500
+        assert_cmd_at_ms: 10
+        expected_cmd: 500
+        cmd_tolerance: 0
