@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-HIL Runner — STM32 Speed Regulator Validation
+HIL Runner — STM32 Speed Regulator Validation (CAN / SocketCAN)
 
-Uses the motor model (MOTOR function) from pi_motor_sim1erordre.py directly.
+Uses the motor model from pi_motor_sim1erordre.py.
 Runs a YAML-defined test suite, captures data every capture_interval_ms,
 and writes a CSV log + Markdown report per test case.
 
@@ -10,7 +10,8 @@ Usage:
     python3 hil_runner.py tests/speed_regulator.yaml
 
 Dependencies:
-    pip install pyserial pyyaml
+    pip install python-can pyyaml
+    (SocketCAN kernel driver must be up: sudo ip link set can0 up type can bitrate 500000)
 """
 
 import sys
@@ -21,15 +22,15 @@ import yaml
 from collections import deque
 from datetime import datetime
 
-# Reuse the UART helpers from the motor simulator — single source of truth
-from pi_motor_sim1erordre import read_accel_int16, send_vset_vv_u8
+# Reuse the CAN helpers from the motor simulator — single source of truth
+from pi_motor_sim1erordre import read_accel_int16, send_vset_vv_u16
 
 
 # ---------------------------------------------------------------------------
 # Core test-case runner
 # ---------------------------------------------------------------------------
 
-def run_test_case(ser, tc: dict, cfg: dict, motor_params: dict):
+def run_test_case(bus, tc: dict, cfg: dict, motor_params: dict):
     """
     Run one test case using the same motor physics as pi_motor_sim1erordre.MOTOR().
 
@@ -40,9 +41,9 @@ def run_test_case(ser, tc: dict, cfg: dict, motor_params: dict):
     Ts = cfg["loop_period_ms"] / 1000.0
     capture_every = cfg["capture_interval_ms"] // cfg["loop_period_ms"]
 
-    # Motor state — identical initialisation to MOTOR()
-    tau      = motor_params["tau_ms"] / 1000.0
-    k_drag   = motor_params["k_drag"]
+    # Motor state
+    tau         = motor_params["tau_ms"] / 1000.0
+    k_drag      = motor_params["k_drag"]
     delay_steps = max(1, int(round(motor_params["delay_ms"] / cfg["loop_period_ms"])))
     delay_line  = deque([0.0] * delay_steps, maxlen=delay_steps)
     a_eff = 0.0
@@ -53,21 +54,26 @@ def run_test_case(ser, tc: dict, cfg: dict, motor_params: dict):
     tick  = 0
     t_ms  = 0
 
+    # Drain stale CAN messages before starting this test case
+    import can as _can
+    while bus.recv(timeout=0) is not None:
+        pass
+
     for phase_idx, phase in enumerate(tc["phases"]):
-        vset     = phase["vset"]
-        vset_u8  = vset & 0xFF
+        vset      = phase["vset"]
+        vset_u16  = int(vset)
         phase_ticks = phase["duration_ms"] // cfg["loop_period_ms"]
 
         for phase_tick in range(phase_ticks):
             t_next = time.monotonic() + Ts
 
-            # ---- Step 1 : read accel from STM32 (same order as MOTOR()) ----
-            a_cmd = read_accel_int16(ser)
+            # ---- Step 1 : read CMD from STM32 (response to previous 0x100) ----
+            a_cmd = read_accel_int16(bus)
             if a_cmd is None:
                 a_cmd = float(delay_line[-1])   # keep last value on timeout
             a_cmd = float(a_cmd)
 
-            # ---- Step 2 : motor model update (identical to MOTOR()) --------
+            # ---- Step 2 : motor model update --------
             delay_line.append(a_cmd)
             a_delayed = delay_line[0]
 
@@ -80,12 +86,12 @@ def run_test_case(ser, tc: dict, cfg: dict, motor_params: dict):
             if v < 0.0:
                 v = 0.0
 
-            vv_u8 = int(v)
-            if vv_u8 > 255:
-                vv_u8 = 255
+            vv_u16 = int(v)
+            if vv_u16 > 65535:
+                vv_u16 = 65535
 
-            # ---- Step 3 : send [VSET, VV] (same call as MOTOR()) -----------
-            send_vset_vv_u8(ser, vv_u8, vset_u8)
+            # ---- Step 3 : send [VSET, VV] to STM32 via CAN 0x100 ----
+            send_vset_vv_u16(bus, vset_u16, vv_u16)
 
             # ---- assert_cmd_at_ms ------------------------------------------
             if "assert_cmd_at_ms" in phase:
@@ -106,7 +112,7 @@ def run_test_case(ser, tc: dict, cfg: dict, motor_params: dict):
                 log_rows.append({
                     "t_ms":       t_ms,
                     "phase_vset": vset,
-                    "vv_sent":    vv_u8,
+                    "vv_sent":    vv_u16,
                     "cmd":        int(a_cmd),
                     "vv_model":   round(v, 2),
                 })
@@ -219,9 +225,9 @@ def main():
         sys.exit(1)
 
     try:
-        import serial as _serial
+        import can as _can
     except ImportError:
-        print("ERROR: pyserial not installed. Run: pip install pyserial pyyaml")
+        print("ERROR: python-can not installed. Run: pip install python-can")
         sys.exit(1)
 
     with open(sys.argv[1], encoding="utf-8") as f:
@@ -235,21 +241,19 @@ def main():
     suite_name   = suite_meta["name"]
 
     print(f"=== HIL Runner — {suite_name} ===")
-    print(f"Port : {cfg['port']} @ {cfg['baud']} baud")
+    print(f"Interface : {cfg['can_interface']} @ {cfg['bitrate']} bps")
     print(f"Loop : {cfg['loop_period_ms']} ms | Capture : {cfg['capture_interval_ms']} ms")
     print(f"Motor: tau={motor_params['tau_ms']}ms  delay={motor_params['delay_ms']}ms  k_drag={motor_params['k_drag']}")
     print()
 
     results = []
 
-    with _serial.Serial(cfg["port"], cfg["baud"], timeout=0.025) as ser:
-        ser.reset_input_buffer()
-
+    with _can.interface.Bus(cfg["can_interface"], bustype="socketcan") as bus:
         for tc in test_cases:
             print(f"--- {tc['id']}: {tc['name']} ---")
             print(f"    initial_vv={tc['initial_vv']}  phases={len(tc['phases'])}")
 
-            log_rows, assertions = run_test_case(ser, tc, cfg, motor_params)
+            log_rows, assertions = run_test_case(bus, tc, cfg, motor_params)
             tc_passed = all(ok for _, ok in assertions)
 
             print(f"    Result: {'PASS' if tc_passed else 'FAIL'}")

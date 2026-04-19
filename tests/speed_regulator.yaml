@@ -1,14 +1,14 @@
 suite:
   name: "Speed_Regulator_Validation"
-  version: "1.0"
+  version: "2.0"
   author: ""
-  description: "Observe P-controller behavior across sequential setpoint phases"
-  dut: "STM32F401RETx — SHIL_PERIPH_TESTING"
+  description: "P-controller HIL validation over CAN — 4 functional test cases"
+  dut: "STM32F401RETx — MCP2515 CAN speed controller"
 
 config:
-  port: "/dev/serial0"
-  baud: 115200
-  loop_period_ms: 10          # STM32 TIM11 control loop period — do not change
+  can_interface: "can0"
+  bitrate: 500000
+  loop_period_ms: 10          # HIL loop period — do not change
   capture_interval_ms: 100    # how often a data row is logged
   reports_dir: "./reports"
   logs_dir: "./logs"
@@ -21,50 +21,222 @@ config:
 
 test_cases:
 
+  # ── TC_001 ────────────────────────────────────────────────────────────────
   - id: TC_001
-    name: "Multi_Step_Setpoint_Ramp"
+    name: "Step_Response_Acceleration"
     description: >
-      Vehicle starts at 10 km/h. Setpoint jumps to 100 km/h for 3 s,
-      then to 160 km/h for 3 s. Observe convergence behavior at each phase.
-    initial_vv: 10
-
-    phases:
-      - vset: 100
-        duration_ms: 3000
-        assert_end:
-          vv_min: 85
-          vv_max: 105
-
-      - vset: 160
-        duration_ms: 3000
-        assert_end:
-          vv_min: 140
-          vv_max: 165
-
-  - id: TC_002
-    name: "Deceleration_Check"
-    description: >
-      Vehicle at 150 km/h, setpoint drops to 50 km/h.
-      Controller should output negative command (braking).
-    initial_vv: 150
-
-    phases:
-      - vset: 50
-        duration_ms: 3000
-        assert_end:
-          vv_min: 40
-          vv_max: 60
-
-  - id: TC_003
-    name: "Saturation_Verification"
-    description: >
-      From rest, full setpoint 255. Controller must saturate at +500 immediately.
-      Observed for 500 ms only.
+      Vehicle starts from rest (0 km/h). Setpoint jumps to 100 km/h.
+      Validates that the controller drives the speed up and converges
+      within the tolerance window in 5 s.
     initial_vv: 0
 
     phases:
-      - vset: 255
-        duration_ms: 500
-        assert_cmd_at_ms: 10
-        expected_cmd: 500
-        cmd_tolerance: 0
+      - vset: 100
+        duration_ms: 5000
+        assert_end:
+          vv_min: 80
+          vv_max: 110
+
+  # ── TC_002 ────────────────────────────────────────────────────────────────
+  - id: TC_002
+    name: "Multi_Step_Ramp"
+    description: >
+      Vehicle starts at 10 km/h. Setpoint increases in two steps:
+      80 km/h for 3 s then 150 km/h for 3 s.
+      Validates convergence at each operating point independently.
+    initial_vv: 10
+
+    phases:
+      - vset: 80
+        duration_ms: 3000
+        assert_end:
+          vv_min: 65
+          vv_max: 90
+
+      - vset: 150
+        duration_ms: 3000
+        assert_end:
+          vv_min: 130
+          vv_max: 160
+
+  # ── TC_003 ────────────────────────────────────────────────────────────────
+  - id: TC_003
+    name: "Deceleration_Check"
+    description: >
+      Vehicle cruising at 150 km/h. Setpoint drops sharply to 40 km/h.
+      Controller must output a negative command to brake the motor.
+      Validates convergence after a large negative step in 4 s.
+    initial_vv: 150
+
+    phases:
+      - vset: 40
+        duration_ms: 4000
+        assert_end:
+          vv_min: 28
+          vv_max: 52
+
+  # ── TC_004 ────────────────────────────────────────────────────────────────
+  - id: TC_004
+    name: "Setpoint_Hold_Stability"
+    description: >
+      Vehicle accelerates from 0 to 100 km/h (phase 1, 5 s to converge),
+      then the setpoint is held at 100 km/h for 4 s (phase 2).
+      Validates that the controller maintains a stable speed without drift
+      once the steady state is reached.
+    initial_vv: 0
+
+    phases:
+      - vset: 100
+        duration_ms: 5000
+        assert_end:
+          vv_min: 80
+          vv_max: 110
+
+      - vset: 100
+        duration_ms: 4000
+        assert_end:
+          vv_min: 85
+          vv_max: 110
+
+  # ── TC_005 ────────────────────────────────────────────────────────────────
+  - id: TC_005
+    name: "Actuator_Saturation_Verification"
+    description: >
+      Large step from 0 to 300 km/h forces P-controller into saturation
+      (error=300 → raw_cmd=600 → clamped to 500). Asserts that the EMA
+      output at the first CAN tick equals 0.2×500=100 (±40). Validates
+      the saturation clamp and EMA initialisation inside STM32 firmware.
+    initial_vv: 0
+
+    phases:
+      - vset: 300
+        duration_ms: 6000
+        assert_cmd_at_ms: 10       # first STM32 reply after VSET=300 is sent
+        expected_cmd: 100          # EMA tick-1: 0.8×0 + 0.2×500 = 100
+        cmd_tolerance: 40
+        assert_end:
+          vv_min: 260
+          vv_max: 310
+
+  # ── TC_006 ────────────────────────────────────────────────────────────────
+  - id: TC_006
+    name: "Deadband_Jitter_Suppression"
+    description: >
+      Vehicle cruises at 100 km/h; setpoint is 101 km/h (error = 1).
+      The STM32 deadband (±1 on error) suppresses the command to 0.
+      Speed must remain within ±4 km/h of the initial value because the
+      motor receives no drive command. Asserts CMD ≈ 0 at 200 ms.
+    initial_vv: 100
+
+    phases:
+      - vset: 101
+        duration_ms: 3000
+        assert_cmd_at_ms: 200      # well after EMA has settled from previous TC
+        expected_cmd: 0
+        cmd_tolerance: 20
+        assert_end:
+          vv_min: 96
+          vv_max: 104
+
+  # ── TC_007 ────────────────────────────────────────────────────────────────
+  - id: TC_007
+    name: "Emergency_Stop_From_High_Speed"
+    description: >
+      Vehicle cruising at 120 km/h; setpoint drops to 0 km/h instantly.
+      Controller outputs maximum negative CMD (−500) to brake the motor.
+      Motor model clamps velocity at 0. Validates negative saturation,
+      transport-delay effect during braking, and the v<0 clamp in the runner.
+    initial_vv: 120
+
+    phases:
+      - vset: 0
+        duration_ms: 6000
+        assert_end:
+          vv_min: 0
+          vv_max: 15
+
+  # ── TC_008 ────────────────────────────────────────────────────────────────
+  - id: TC_008
+    name: "EMA_Filter_Temporal_Fingerprint"
+    description: >
+      0 → 150 km/h step (error=150, raw_cmd=300, no saturation).
+      Phase 1 lasts only 20 ms and asserts CMD at t=10 ms:
+        expected = 0.2 × 300 = 60 (first EMA tick from cmd_f=0).
+      Phase 2 runs to convergence. This test exposes the EMA state
+      machine inside the STM32 without observing velocity — a uniquely
+      HIL capability.
+    initial_vv: 0
+
+    phases:
+      - vset: 150
+        duration_ms: 20
+        assert_cmd_at_ms: 10       # first reply; EMA: 0.8×0 + 0.2×300 = 60
+        expected_cmd: 60
+        cmd_tolerance: 30
+
+      - vset: 150
+        duration_ms: 5000
+        assert_end:
+          vv_min: 125
+          vv_max: 160
+
+  # ── TC_009 ────────────────────────────────────────────────────────────────
+  - id: TC_009
+    name: "Cascade_Deceleration_Steps"
+    description: >
+      Vehicle starts at 180 km/h and the setpoint is reduced in three
+      cascaded steps: 120 → 60 → 10 km/h. Each phase must converge
+      independently before the next drop. Validates that the controller
+      tracks multiple sequential operating points during sustained
+      deceleration.
+    initial_vv: 180
+
+    phases:
+      - vset: 120
+        duration_ms: 3000
+        assert_end:
+          vv_min: 100
+          vv_max: 132
+
+      - vset: 60
+        duration_ms: 3000
+        assert_end:
+          vv_min: 45
+          vv_max: 75
+
+      - vset: 10
+        duration_ms: 4000
+        assert_end:
+          vv_min: 0
+          vv_max: 25
+
+  # ── TC_010 ────────────────────────────────────────────────────────────────
+  - id: TC_010
+    name: "Setpoint_Oscillation_Recovery"
+    description: >
+      Vehicle accelerates 0→100 km/h (phase 1, 5 s), then decelerates
+      to 20 km/h (phase 2, 4 s), then re-accelerates to 100 km/h
+      (phase 3, 5 s). The static cmd_f on the STM32 carries over from
+      phase 2 into phase 3, exercising controller recovery from a
+      non-zero EMA initial condition — a condition unique to real
+      embedded hardware and invisible in pure simulation.
+    initial_vv: 0
+
+    phases:
+      - vset: 100
+        duration_ms: 5000
+        assert_end:
+          vv_min: 80
+          vv_max: 110
+
+      - vset: 20
+        duration_ms: 4000
+        assert_end:
+          vv_min: 10
+          vv_max: 35
+
+      - vset: 100
+        duration_ms: 5000
+        assert_end:
+          vv_min: 80
+          vv_max: 110

@@ -4,37 +4,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a **Hardware-in-Loop (HIL)** motor speed regulation system. An STM32F401 microcontroller runs a P-controller, validated against a 1st-order motor simulation on a Raspberry Pi over UART. An ESP32 provides potentiometer-based setpoint input.
+This is a **Hardware-in-Loop (HIL)** motor speed regulation system. An STM32F401 microcontroller runs a P-controller, validated against a 1st-order motor simulation on a Raspberry Pi. Communication between the two nodes uses **CAN bus** via an MCP2515 SPI-CAN module on each side.
 
 **Node roles:**
-- **STM32F401** (`SHIL_PERIPH_TESTING/`) — Speed controller firmware (P-controller, 10ms interrupt loop)
-- **Raspberry Pi** (`PI_Motor_sim_code/`, `../RASPI_NODE/`) — Motor simulator + test runner
-- **ESP32** (`../../ESP32-Node/`) — Potentiometer/setpoint input device
+- **STM32F401** (`SHIL_PERIPH_TESTING/`) — Speed controller firmware (P-controller + EMA filter, 10 ms interrupt loop)
+- **Raspberry Pi** (`PI_Motor_sim_code/`) — Motor simulator + HIL test runner (CAN bus via MCP2515)
+
+---
 
 ## Repository Layout
 
 ```
 STM32_PI_communication/
 ├── PI_Motor_sim_code/
-│   ├── pi_motor_sim1erordre.py   # Motor simulator + UART helpers (MOTOR, read_accel_int16, send_vset_vv_u8)
+│   ├── pi_motor_sim1erordre.py   # CAN helpers: read_accel_int16, send_vset_vv_u16
 │   ├── hil_runner.py             # HIL test runner — imports from pi_motor_sim1erordre
+│   ├── plot_results.py           # Result visualiser — plots CSV logs (speed + CMD)
 │   ├── tests/
-│   │   └── speed_regulator.yaml  # HIL test suite (TC_001–TC_003)
+│   │   └── speed_regulator.yaml  # HIL test suite (TC_001–TC_004)
 │   ├── reports/                  # Auto-generated Markdown reports (timestamped)
 │   └── logs/                     # Auto-generated CSV logs (timestamped)
 └── SHIL_PERIPH_TESTING/          # STM32 firmware project (STM32CubeIDE / Eclipse)
-    ├── Core/Src/main.c            # Application logic: speedlimiter(), control ISR
+    ├── Core/Src/main.c            # Application logic: speedlimiter(), TIM11 ISR
     ├── Core/Inc/
     ├── Debug/makefile             # GNU Make build script
     ├── SHIL_PERIPH_TESTING.ioc   # STM32CubeMX peripheral config
     └── STM32F401RETX_FLASH.ld    # Linker script
 
-../RASPI_NODE/
-├── pyrunnner.py                   # Legacy YAML-driven UART/GPIO test automation
-├── TEST.YAML / testi.yaml         # Legacy test scenario definitions
-├── UART_SPEED.py                  # Speed variation simulator
-└── graphplot.py                   # Sigrok/PulseView CSV plotter
 ```
+
+---
 
 ## Build — STM32 Firmware
 
@@ -54,103 +53,180 @@ make
 
 Flashing is done via STM32CubeIDE or ST-Link (not automated in this repo).
 
+---
+
 ## Run — Raspberry Pi Scripts
 
+### One-time CAN interface setup
 ```bash
-# Motor simulation (requires STM32 connected on /dev/serial0, ESP32 on /dev/ttyUSB0)
-python3 pi_motor_sim1erordre.py
-
-# HIL test runner (preferred) — runs full test suite, writes CSV + Markdown report
-cd STM32_PI_communication/PI_Motor_sim_code
-pip install pyserial pyyaml   # one-time
-python3 hil_runner.py tests/speed_regulator.yaml
-
-# Legacy YAML-driven test (GPIO stimulus + single-shot verdict)
-python3 pyrunnner.py   # reads TEST.YAML in the same directory
+# Load MCP2515 SPI-CAN driver (add to /boot/config.txt for persistence)
+sudo ip link set can0 up type can bitrate 500000
+ip link show can0   # confirm interface is UP
 ```
 
-## UART Communication Protocol
+### Install dependencies
+```bash
+sudo apt update
+sudo apt install python3-pip python3-yaml
+pip install python-can matplotlib pandas
+```
 
-| Direction | Bytes | Meaning |
-|-----------|-------|---------|
-| Pi → STM32 | `[VSET, VV]` | Speed setpoint (u8), measured velocity (u8) |
-| STM32 → Pi | `[LSB, MSB]` | Acceleration command (int16_t, range ±500) |
+### Run HIL test suite (preferred)
+```bash
+cd PI_Motor_sim_code          # hil_runner.py and pi_motor_sim1erordre.py must be in same dir
+python3 hil_runner.py tests/speed_regulator.yaml
+# Outputs: logs/log_<TC>_<suite>_<timestamp>.csv
+#          reports/report_<suite>_<timestamp>.md
+```
 
-- **Port:** USART1 on STM32 (`/dev/serial0` on Pi), 115200 8N1
-- **Timing:** STM32 control loop fires every ~10 ms (TIM11 interrupt)
+### Plot results
+```bash
+python3 plot_results.py                         # plots latest CSV in logs/
+python3 plot_results.py logs/log_TC_001_*.csv   # specific file
+python3 plot_results.py logs/tc1.csv logs/tc2.csv  # overlay multiple
+# Saves a PNG alongside the first input CSV
+```
+
+---
+
+## CAN Communication Protocol
+
+| Direction | CAN ID | Data | Meaning |
+|-----------|--------|------|---------|
+| Pi → STM32 | `0x100` | 4 bytes | Bytes 0–1 = VSET (uint16 LE), Bytes 2–3 = VV (uint16 LE) |
+| STM32 → Pi | `0x200` | 2 bytes | Acceleration command (int16 LE, range ±500) |
+
+- **Interface:** SocketCAN `can0`, 500 kbps (MCP2515 SPI-CAN module)
+- **Pi receive timeout:** 25 ms per `read_accel_int16` call
+- **STM32 control loop:** TIM11 fires every 10 ms (`Prescaler=7199, Period=99`, APB2=72 MHz)
+
+---
 
 ## Key Application Code
 
-**`Core/Src/main.c`** — All application logic lives here:
-- `speedlimiter(VSET, VV)` — P-controller: `cmd = (VSET - VV) * 2`, clamped to ±500
-- `HAL_TIM_PeriodElapsedCallback()` — TIM11 ISR at 10 ms; reads 2-byte UART Rx, calls `speedlimiter()`, transmits 2-byte result
-- Peripherals used: USART1 (Pi link), USART2 (debug), TIM11 (control timer), GPIO PA1
+### `Core/Src/main.c` — STM32 firmware
 
-**`PI_Motor_sim_code/pi_motor_sim1erordre.py`** — Motor simulator and shared UART helpers:
-- Time constant `tau = 0.100 s`, delay `Td = 0.250 s`, timestep `Ts = 0.010 s`
-- `read_accel_int16(ser)` — reads 2-byte int16 LE from STM32 (acceleration command)
-- `send_vset_vv_u8(ser, vset_u8, vv_u8)` — writes `bytes([vset_u8, vv_u8])` to STM32
-- `MOTOR(ser_stm32, poll_vset_u8, ...)` — full real-time motor loop (used standalone with ESP32)
-- **`hil_runner.py` imports `read_accel_int16` and `send_vset_vv_u8` from this file** — single source of truth for UART helpers
+**TIM11 ISR (`HAL_TIM_PeriodElapsedCallback`):**
+```c
+if (htim->Instance == TIM11) {
+    // Receive [VSET_u16_LE, VV_u16_LE] via CAN 0x100
+    // speedlimiter(VSET, VV)
+    // Transmit int16 LE CMD via CAN 0x200
+}
+```
 
-## HIL Test Framework (`hil_runner.py`) — current
+**`speedlimiter(VSET, VV)` — current implementation:**
+1. Deadband ±1 on error (suppresses jitter)
+2. P-controller: `cmd = (VSET - VV) * 2`
+3. Saturation: clamped to `±500`
+4. **EMA smoothing:** `cmd_f = 0.8 × cmd_f + 0.2 × cmd` (alpha=0.2)
+5. Output packed as int16 LE into CAN frame
 
-Closed-loop runner that reuses `pi_motor_sim1erordre.py` for all motor and UART logic.
-Per-tick loop order (matches `MOTOR()` exactly):
-1. `read_accel_int16(ser)` — read CMD int16 from STM32 (or keep last value on timeout)
-2. Update motor model: delay line → 1st-order inertia filter → integrate velocity
-3. `send_vset_vv_u8(ser, vv_u8, vset_u8)` — send current VV + active setpoint to STM32
+**EMA impact:** The filter introduces lag on the first ~200 ms after a setpoint change. Starting from `cmd_f=0`, it takes ~15–20 ticks to reach steady-state command value. Widen `assert_end` tolerances if tests fail near phase boundaries.
 
-A data row is captured every `capture_interval_ms` (default 100 ms). Phase assertions are checked at the end of each phase (or at a specific tick for `assert_cmd_at_ms`).
+**Static variable warning:** `cmd_f` is `static float` — it persists across test cases within the same STM32 power cycle. TC_002/TC_003/TC_004 will not start from `cmd_f=0`.
 
-**YAML schema** (`tests/speed_regulator.yaml`):
+**Timer configuration (confirmed):**
+```c
+htim11.Init.Prescaler = 7200-1;   // 7200
+htim11.Init.Period    = 100-1;    // 100  →  7200×100/72MHz = 10 ms ✅
+```
+
+**Peripherals:** CAN (MCP2515 via SPI), USART2 (debug), TIM11 (control timer), GPIO PA1 (input)
+
+---
+
+### `PI_Motor_sim_code/pi_motor_sim1erordre.py` — CAN helpers
+
+Pure CAN communication module. Contains no motor model or standalone simulator.
+
+```python
+CAN_ID_CMD  = 0x200   # STM32 → Pi : int16 LE  (acceleration command, ±500)
+CAN_ID_CTRL = 0x100   # Pi → STM32 : uint16 LE VSET | uint16 LE VV
+```
+
+- `read_accel_int16(bus)` — waits up to 25 ms for CAN `0x200`, returns `int16` or `None`
+- `send_vset_vv_u16(bus, vset_u16, vv_u16)` — packs `[VSET, VV]` as 4 bytes LE and sends on CAN `0x100`
+- **`hil_runner.py` imports both functions from this file** — both must be in the same directory
+
+---
+
+## HIL Test Framework (`hil_runner.py`)
+
+Closed-loop runner using `python-can` + SocketCAN. Per-tick loop (10 ms):
+1. `read_accel_int16(bus)` — read CMD from STM32 via CAN `0x200` (fallback to last value on timeout)
+2. Motor model update: delay line (25 steps) → 1st-order inertia filter → integrate velocity
+3. `send_vset_vv_u16(bus, vset_u16, vv_u16)` — send `[VSET, VV]` to STM32 via CAN `0x100`
+
+Captures one data row every `capture_interval_ms` (default 100 ms). Runs each phase for `duration_ms`, then checks assertions. Drains stale CAN messages before each test case starts.
+
+### YAML schema (`tests/speed_regulator.yaml`)
 ```yaml
 suite:   {name, version, dut, description}
-config:  {port, baud, loop_period_ms, capture_interval_ms, reports_dir, logs_dir,
+config:  {can_interface, bitrate, loop_period_ms, capture_interval_ms, reports_dir, logs_dir,
           motor: {tau_ms, delay_ms, k_drag}}
 test_cases:
   - id: TC_001
-    initial_vv: 10
+    name: "Step_Response_Acceleration"
+    initial_vv: 0
     phases:
       - vset: 100
-        duration_ms: 3000
-        assert_end: {vv_min: 85, vv_max: 105}
-      - vset: 160
-        duration_ms: 3000
-        assert_end: {vv_min: 140, vv_max: 165}
+        duration_ms: 5000
+        assert_end: {vv_min: 80, vv_max: 110}
+  - id: TC_004
+    initial_vv: 0
+    phases:
+      - vset: 100
+        duration_ms: 5000
+        assert_end: {vv_min: 80, vv_max: 110}
+        assert_cmd_at_ms: 10        # check CMD at exact tick
+        expected_cmd: 500
+        cmd_tolerance: 0
 ```
 
-Supported phase assertions:
-- `assert_end: {vv_min, vv_max}` — check VV at end of phase
-- `assert_cmd_at_ms / expected_cmd / cmd_tolerance` — check CMD at a specific tick
+### Test cases defined
+| ID | Name | initial_vv | Phases | Purpose |
+|----|------|-----------|--------|---------|
+| TC_001 | Step_Response_Acceleration | 0 | 0→100 km/h | Convergence from rest |
+| TC_002 | Multi_Step_Ramp | 10 | 80→150 km/h | Convergence at two operating points |
+| TC_003 | Deceleration_Check | 150 | 150→40 km/h | Negative CMD (braking), convergence |
+| TC_004 | Setpoint_Hold_Stability | 0 | 0→100→hold 100 | Steady-state stability after convergence |
 
-**Output files** (timestamped):
+### Output files (timestamped)
 - `logs/log_<TC_ID>_<suite>_<timestamp>.csv` — columns: `t_ms, phase_vset, vv_sent, cmd, vv_model`
-- `reports/report_<suite>_<timestamp>.md` — Markdown table per phase + pass/fail verdicts
+- `reports/report_<suite>_<timestamp>.md` — Markdown table per phase + assertion verdicts
 
-**Import relationship:** `hil_runner.py` does `from pi_motor_sim1erordre import read_accel_int16, send_vset_vv_u8`. Both files must be in the same directory (`PI_Motor_sim_code/`).
+---
 
-**Note on `send_vset_vv_u8` call convention:** in `pi_motor_sim1erordre.py` the `MOTOR()` function calls `send_vset_vv_u8(ser, vv_u8, vset_u8)` (velocity first, setpoint second — reversed from the function signature). `hil_runner.py` replicates this exact call to stay consistent with the existing behaviour.
+### `PI_Motor_sim_code/plot_results.py` — Result visualiser
 
-## Legacy Test Framework (`pyrunnner.py`)
+Reads one or more CSV log files and renders a 2-row subplot per file:
+- **Top:** VSET (step), VV model, VV sent — with phase boundary markers
+- **Bottom:** CMD with ±500 saturation lines
 
-Tests are defined in YAML with timestamped stimulus steps:
-
-```yaml
-test_name: Test_UART_5_Steps
-steps:
-  - time_ms: 0
-    gpio: 1
-    uart: "VAL,1"
-  - time_ms: 100
-    gpio: 0
-    uart: "VAL,2"
+```bash
+python3 plot_results.py                         # auto-picks latest CSV
+python3 plot_results.py logs/log_TC_001_*.csv   # specific file(s)
 ```
 
-Runner phases: emit GPIO/UART stimuli → wait 250 ms → read STM32 response → compare expected vs. measured → pass/fail verdict.
+Saves output as `logs/plot_<original_csv_name>.png`.
+
+**Dependencies:** `matplotlib`, `pandas`
+
+---
+
+## Known Limitations / Next Steps
+
+- **EMA on STM32 persists across test cases** — `cmd_f` is static. A cold-start reset or power cycle between TC runs gives cleaner results for TC_002/TC_003/TC_004.
+- **CAN interface must be up** — run `sudo ip link set can0 up type can bitrate 500000` before executing the HIL runner; otherwise `python-can` will fail to open the bus.
+- **Pi loop not hardware-timed** — `time.sleep()` is used for 10 ms pacing. On a loaded Pi, actual loop time can vary ±2–5 ms.
+- **`assert_cmd_at_ms`** — due to EMA (alpha=0.2), the first CMD sent by STM32 will be `~0.2×500 = 100`, not 500. Any assertion expecting 500 at tick 0 will FAIL unless `cmd_tolerance` accounts for the EMA.
+- **No standalone motor simulator** — `pi_motor_sim1erordre.py` no longer contains a `MOTOR()` function; it is a pure CAN helper. The motor model now lives entirely inside `hil_runner.py`.
+
+---
 
 ## STM32CubeMX Configuration
 
-Open `SHIL_PERIPH_TESTING.ioc` in STM32CubeMX to view/modify peripheral config. After regenerating code, user logic is preserved in `USER CODE BEGIN/END` blocks.
+Open `SHIL_PERIPH_TESTING.ioc` to view/modify peripheral config. User logic is preserved in `USER CODE BEGIN/END` blocks after regeneration.
 
-Enabled peripherals: TIM11, USART1, USART2, GPIO (PA1 input), RCC, NVIC.
+Enabled peripherals: TIM11, SPI (MCP2515 CAN), USART2, GPIO (PA1 input), RCC, NVIC.
