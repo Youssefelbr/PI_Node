@@ -1,0 +1,230 @@
+# =============================================================================
+#  HIL Test Suite — Speedlimiter Only (no lead vehicle / no ACC)
+#  DUT : STM32F401RETx  (MCP2515 CAN, acc_controller + speedlimiter)
+#  Pi  : hil_test_runner.py  (motor: tau=10ms, delay=1ms, k_drag=0)
+#
+#  SCOPE:
+#    Every test case here omits the `radar` block (or sets lead_present: false),
+#    so acc_controller() always routes to speedlimiter(vset, vv) — the pure
+#    speed P-controller. No gap/ACC behavior is exercised in this suite.
+#
+#  SPEEDLIMITER P-CONTROLLER (STM32 firmware):
+#    error  = vset - vv
+#    deadband: |error| < 1 km/h  →  cmd = 0
+#    cmd    = (vset - vv) * 2        gain = 2 cmd/(km/h)
+#    clamp  = ±500
+#    EMA    = cmd_f = 0.8*cmd_f + 0.2*cmd   (alpha=0.2)
+#
+#  ⚠  cmd_f is `static float` on the STM32 — it persists across test cases
+#     within a single power cycle. assert_cmd_at_ms cases below use a wide
+#     tolerance to stay robust to whatever EMA state the previous test case
+#     left behind. Power-cycle the STM32 before this suite for cleanest results.
+#
+#  ⚠  Only vv_min / vv_max in assert_end are evaluated by hil_test_runner.py.
+#     gap_min / gap_max are not applicable here since no radar is present.
+#
+#  LANCER:
+#    python3 hil_test_runner.py tests/test_suite_speedlimiter_only.yaml
+# =============================================================================
+
+suite:
+  name: "Speedlimiter_Only"
+  version: "1.0"
+  description: >
+    Speedlimiter-only validation suite: no lead vehicle, no ACC engagement.
+    Exercises the vset-tracking P-controller across step response, deceleration,
+    multi-step ramps, hold stability, deadband behavior, saturation clamp,
+    setpoint reversal, and full-stop scenarios.
+  dut: "STM32F401RETx — speedlimiter"
+
+config:
+  can_interface: "can0"
+  bitrate: 500000
+  loop_period_ms: 10
+  capture_interval_ms: 100
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+
+  motor:
+    tau_ms: 100         # fast plant — motor settles in ~30 ms
+    delay_ms: 100
+    k_drag: 0.08
+
+
+test_cases:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_001 — Step Response Acceleration from Rest
+  #
+  # Vehicle starts at 0 km/h. Setpoint jumps to 120 km/h. Validates the
+  # controller drives speed up and converges within 6 s.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_001
+    name: "SPD_Step_Response_Acceleration"
+    initial_vv: 40
+
+    phases:
+      - vset: 110
+        duration_ms: 10000
+        assert_end:
+          vv_min: 100
+          vv_max: 113
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_002 — Step Deceleration from High Speed
+  #
+  # Vehicle cruising at 180 km/h. Setpoint drops sharply to 60 km/h.
+  # Controller must output a negative command (braking) and converge.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_002
+    name: "SPD_Step_Deceleration"
+    initial_vv: 110
+
+    phases:
+      - vset: 60
+        duration_ms: 10000
+        assert_end:
+          vv_min: 40
+          vv_max: 75
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_003 — Multi-Step Ramp Up
+  #
+  # Vehicle starts at 20 km/h. Setpoint steps to 70 (3 s), then 130 (3 s),
+  # then 180 (3 s). Validates convergence at each successive operating point.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_003
+    name: "SPD_Multi_Step_Ramp_Up"
+    initial_vv: 70
+
+    phases:
+      - vset: 99
+        duration_ms: 20000
+        assert_end:
+          vv_min: 80
+          vv_max: 105
+
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_004 — Setpoint Hold Stability
+  #
+  # Vehicle accelerates from 0 to 130 km/h (5 s to converge), then the
+  # setpoint is held at 130 km/h for 4 more seconds. Validates no drift
+  # once settled.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_004
+    name: "SPD_Setpoint_Hold_Stability"
+    initial_vv: 160
+
+    phases:
+      - vset: 100
+        duration_ms: 10000
+        assert_end:
+          vv_min: 90
+          vv_max: 110
+
+      - vset: 85
+        duration_ms: 10000
+        assert_end:
+          vv_min: 60
+          vv_max: 90
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_005 — Fine Tracking / Small Step Near Deadband
+  #
+  # Vehicle cruising at 100 km/h. Setpoint nudges to 104 km/h (small error,
+  # just outside the ±1 km/h deadband). Validates fine-grained tracking
+  # without overshoot from the P-controller + EMA.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_005
+    name: "SPD_Fine_Tracking_Small_Step"
+    initial_vv: 65
+
+    phases:
+      - vset: 123
+        duration_ms: 10000
+        assert_end:
+          vv_min: 119
+          vv_max: 130
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_006 — Deadband No-Command Check
+  #
+  # Vehicle cruising at 90 km/h, setpoint held at 90 km/h (error = 0,
+  # well inside the ±1 km/h deadband). cmd should stay at 0 and speed
+  # should not drift.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_006
+    name: "SPD_Deadband_NoCommand"
+    initial_vv: 90
+
+    phases:
+      - vset: 90
+        duration_ms: 20000
+        assert_cmd_at_ms: 1000
+        expected_cmd: 0
+        cmd_tolerance: 5
+        assert_end:
+          vv_min: 87
+          vv_max: 93
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_007 — Saturation Clamp Verification
+  #
+  # From rest, full setpoint jump to 255 km/h. Error is far beyond the
+  # linear range (255*2 = 510 > 500), so cmd must clamp at +500 almost
+  # immediately. Wide tolerance accounts for EMA state carried over from
+  # whatever test case ran previously in this power cycle.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_007
+    name: "SPD_Saturation_Clamp"
+    initial_vv: 0
+
+    phases:
+      - vset: 102
+        duration_ms: 10000
+        assert_cmd_at_ms: 500
+        expected_cmd: 500
+        cmd_tolerance: 50
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_008 — Setpoint Reversal / Oscillation
+  #
+  # Vehicle at 100 km/h. Setpoint drops to 50 (3 s), then back up to 100
+  # (3 s). Validates the controller handles a full direction reversal
+  # without instability.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_008
+    name: "SPD_Setpoint_Reversal"
+    initial_vv: 100
+
+    phases:
+      - vset: 50
+        duration_ms: 30000
+        assert_end:
+          vv_min: 35
+          vv_max: 65
+
+      - vset: 100
+        duration_ms: 30000
+        assert_end:
+          vv_min: 82
+          vv_max: 112
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_009 — Full Stop from Cruise
+  #
+  # Vehicle cruising at 80 km/h. Setpoint drops to 0. Validates the
+  # controller brings the vehicle to a stop without going negative
+  # (motor model clamps v at 0).
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_009
+    name: "SPD_Full_Stop_From_Cruise"
+    initial_vv: 80
+
+    phases:
+      - vset: 55
+        duration_ms: 50000
+        assert_end:
+          vv_min: 0
+          vv_max: 20

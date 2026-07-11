@@ -1,0 +1,284 @@
+# =============================================================================
+#  HIL Test Suite — ACC Focus (lead vehicle always present, VSET unused)
+#  DUT : STM32F401RETx  (MCP2515 CAN, acc_controller + speedlimiter)
+#  Pi  : hil_test_runner.py  (motor: tau=100ms, delay=250ms, k_drag=0)
+#
+#  SCOPE:
+#    Every phase in every test case sets radar.lead_present: true, so
+#    acc_controller() always routes to the ACC distance P-controller and
+#    NEVER to speedlimiter(). `vset` is still present in each phase only
+#    because hil_test_runner.py requires the key to build the CAN 0x100
+#    frame — the STM32 firmware ignores it entirely while ACC is engaged.
+#
+#  FIRMWARE ACC FORMULA  (d_target):
+#    d_target [cm] = (vv * 550) / 90   (integer division)
+#
+#  REFERENCE d_target VALUES:
+#    60 km/h  →   366 cm
+#    70 km/h  →   427 cm
+#    80 km/h  →   488 cm
+#    90 km/h  →   549 cm
+#   100 km/h  →   611 cm
+#
+#  ACC P-CONTROLLER (STM32 firmware):
+#    e_d    = distance_cm - d_target
+#    cmdd   = (e_d * 2) / 100         gain = 0.02 cmd/cm  (deliberately slow)
+#    clamp  = ±500
+#    EMA    = alpha=0.2
+#    dead zone: |e_d| < 50 cm  →  cmdd rounds to 0 (integer division)
+#
+#  At steady state (e_d → 0) the ego vehicle speed converges to the lead
+#  vehicle's speed — assert_end below checks vv_min/vv_max against that
+#  expected equilibrium since gap_min/gap_max are not evaluated by the
+#  runner (see note below).
+#
+#  ⚠  Only vv_min / vv_max in assert_end are evaluated by hil_test_runner.py.
+#     gap_min / gap_max are written for documentation only.
+#
+#  ⚠  ACC gain is low (0.02) and this suite uses a slower motor model
+#     (tau=100ms, delay=250ms) than the 5v5/comprehensive suites — phase
+#     durations are long (60-120 s) to allow convergence. Tune assert
+#     windows after a real hardware run; they are conservative estimates.
+#
+#  LANCER:
+#    python3 hil_test_runner.py tests/test_suite_acc_focus.yaml
+# =============================================================================
+
+suite:
+  name: "ACC_Focus"
+  version: "1.0"
+  description: >
+    ACC-only validation suite — lead vehicle present in every phase of every
+    test case, VSET never drives ego behavior. Covers gap-closing, gap-opening,
+    steady-state / dead-zone stability, lead hard braking, lead pulling away,
+    and low/high speed operating points.
+  dut: "STM32F401RETx — acc_controller (ACC branch only)"
+
+config:
+  can_interface: "can0"
+  bitrate: 500000
+  loop_period_ms: 10
+  capture_interval_ms: 100
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+
+  motor:
+    tau_ms: 1
+    delay_ms: 10
+    k_drag: 0.0
+
+
+test_cases:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_001 — Gap Far Away: positive error → ego must accelerate to close
+  #
+  # Ego and lead both at 80 km/h. Initial gap = 3000 cm >> d_target(80)=488 cm.
+  # e_d = +2512 cm → cmdd = (2512×2)/100 = 50. Ego rises above 80, gap closes.
+  # Equilibrium: v_ego → 80 km/h, gap → 488 cm.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_001
+    name: "ACC_GapFarAway_PositiveError"
+    initial_vv: 80
+
+    phases:
+      - vset: 80   # ignored — ACC active
+        duration_ms: 90000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 3000
+        assert_end:
+          vv_min: 68
+          vv_max: 97
+          gap_min: 250
+          gap_max: 750
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_002 — Gap Too Close: negative error → ego must brake to open gap
+  #
+  # Ego at 80, lead at 95 km/h. Initial gap = 100 cm << d_target(80)=488 cm.
+  # e_d = -388 → cmdd = (-388×2)/100 = -7. Ego decelerates below lead, gap opens.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_002
+    name: "ACC_GapTooClose_NegativeError"
+    initial_vv: 80
+
+    phases:
+      - vset: 80   # ignored — ACC active
+        duration_ms: 90000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 95
+          initial_distance_cm: 100
+        assert_end:
+          vv_min: 60
+          vv_max: 90
+          gap_min: 150
+          gap_max: 650
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_003 — Gap At Target: steady-state stability
+  #
+  # Ego and lead at 80 km/h, gap initialised exactly at d_target(80)=488 cm.
+  # e_d = 0 → dead-zone → cmdd = 0. System should stay stable, no drift.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_003
+    name: "ACC_GapAtTarget_Stability"
+    initial_vv: 80
+
+    phases:
+      - vset: 80   # ignored — ACC active
+        duration_ms: 30000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 488
+        assert_end:
+          vv_min: 74
+          vv_max: 86
+          gap_min: 400
+          gap_max: 600
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_004 — Dead Zone Boundary: error just inside ±50 cm
+  #
+  # Ego and lead at 80 km/h, gap = d_target(80) + 40 = 528 cm.
+  # e_d = +40 cm → cmdd = (40×2)/100 = 0 (integer division rounds to 0).
+  # Validates the dead zone actually suppresses small errors.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_004
+    name: "ACC_DeadZone_Boundary"
+    initial_vv: 80
+
+    phases:
+      - vset: 80   # ignored — ACC active
+        duration_ms: 30000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 528
+        assert_end:
+          vv_min: 76
+          vv_max: 84
+          gap_min: 450
+          gap_max: 600
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_005 — Lead Hard Brakes: gap collapses, ACC must brake ego quickly
+  #
+  # Phase 1: stable following at 80/80, gap=800 cm. 30 s to establish.
+  # Phase 2: lead drops suddenly to 30 km/h, gap reset to 800 cm.
+  #          Δv = 50 km/h → gap closes fast → ACC commands strong deceleration.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_005
+    name: "ACC_LeadHardBrakes_EmergencyDecel"
+    initial_vv: 80
+
+    phases:
+      # Phase 1 — stable following
+      - vset: 80   # ignored — ACC active
+        duration_ms: 30000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 800
+        assert_end:
+          vv_min: 65
+          vv_max: 92
+
+      # Phase 2 — lead brakes hard
+      - vset: 80   # ignored — ACC active
+        duration_ms: 60000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 30
+          initial_distance_cm: 800
+        assert_end:
+          vv_min: 15
+          vv_max: 58
+          gap_min: 100
+          gap_max: 700
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_006 — Lead Accelerates Away: gap opens, ego must speed up to re-close
+  #
+  # Phase 1: stable following at 70/70, gap=427 cm (=d_target(70)). 30 s.
+  # Phase 2: lead accelerates to 110 km/h, gap held at 427 cm reference.
+  #          Gap opens as lead pulls away → ACC commands acceleration to
+  #          re-close toward the new (larger, since vv rises) d_target.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_006
+    name: "ACC_LeadAcceleratesAway_Catchup"
+    initial_vv: 70
+
+    phases:
+      # Phase 1 — stable following
+      - vset: 70   # ignored — ACC active
+        duration_ms: 30000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 70
+          initial_distance_cm: 427
+        assert_end:
+          vv_min: 62
+          vv_max: 78
+
+      # Phase 2 — lead pulls away
+      - vset: 70   # ignored — ACC active
+        duration_ms: 90000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 110
+          initial_distance_cm: 427
+        assert_end:
+          vv_min: 75
+          vv_max: 112
+          gap_min: 300
+          gap_max: 900
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_007 — Low-Speed Following: d_target(60)=366 cm reference point
+  #
+  # Ego and lead at 60 km/h, initial gap = 200 cm << 366 cm.
+  # ACC must open the gap toward 366 cm while holding lead's speed.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_007
+    name: "ACC_LowSpeed_Following"
+    initial_vv: 60
+
+    phases:
+      - vset: 60   # ignored — ACC active
+        duration_ms: 60000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 60
+          initial_distance_cm: 200
+        assert_end:
+          vv_min: 48
+          vv_max: 70
+          gap_min: 250
+          gap_max: 550
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_008 — High-Speed Following: d_target(100)=611 cm reference point
+  #
+  # Ego and lead at 100 km/h, initial gap = 1500 cm >> 611 cm.
+  # ACC must accelerate ego to close the gap toward 611 cm.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_008
+    name: "ACC_HighSpeed_Following"
+    initial_vv: 100
+
+    phases:
+      - vset: 100   # ignored — ACC active
+        duration_ms: 90000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 100
+          initial_distance_cm: 1500
+        assert_end:
+          vv_min: 88
+          vv_max: 118
+          gap_min: 400
+          gap_max: 900

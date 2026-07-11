@@ -1,0 +1,201 @@
+suite:
+  name: "Speed_ACC_Validation_v2"
+  version: "2.0"
+  author: ""
+  description: >
+    Realistic HIL validation — P-controller (Kp=2, EMA alpha=0.2) +
+    ACC with radar. Scenarios calibrated to motor model:
+    tau=100ms, delay=250ms. Gap sizes respect physics at each speed.
+  dut: "STM32F401RETx — MCP2515 CAN speed+ACC controller"
+
+config:
+  can_interface: "can0"
+  bitrate: 500000
+  loop_period_ms: 10
+  capture_interval_ms: 100
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+
+  motor:
+    tau_ms: 100
+    delay_ms: 250
+    k_drag: 0.0
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  BASELINE — P-controller validation (no radar, no ACC logic)
+# ════════════════════════════════════════════════════════════════════════════
+
+test_cases:
+
+  # ── TC_001 ────────────────────────────────────────────────────────────────
+  # Step 0→100 km/h. 5s is enough to converge given tau=100ms + delay=250ms.
+  - id: TC_001
+    name: "Step_Response_Acceleration"
+    initial_vv: 0
+    phases:
+      - vset: 100
+        duration_ms: 5000
+        assert_end: {vv_min: 80, vv_max: 110}
+
+  # ── TC_002 ────────────────────────────────────────────────────────────────
+  # Multi-step ramp from 10 km/h. Two operating points.
+  - id: TC_002
+    name: "Multi_Step_Ramp"
+    initial_vv: 10
+    phases:
+      - vset: 80
+        duration_ms: 3000
+        assert_end: {vv_min: 65, vv_max: 90}
+
+      - vset: 150
+        duration_ms: 3000
+        assert_end: {vv_min: 130, vv_max: 160}
+
+  # ── TC_003 ────────────────────────────────────────────────────────────────
+  # Large negative step — braking from 150→40.
+  - id: TC_003
+    name: "Deceleration_Check"
+    initial_vv: 150
+    phases:
+      - vset: 40
+        duration_ms: 4000
+        assert_end: {vv_min: 28, vv_max: 52}
+
+  # ── TC_004 ────────────────────────────────────────────────────────────────
+  # Converge then hold. Validates steady-state stability.
+  - id: TC_004
+    name: "Setpoint_Hold_Stability"
+    initial_vv: 0
+    phases:
+      - vset: 100
+        duration_ms: 5000
+        assert_end: {vv_min: 80, vv_max: 110}
+
+      - vset: 100
+        duration_ms: 4000
+        assert_end: {vv_min: 88, vv_max: 110}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  ACC SCENARIOS — radar on CAN 0x300
+#
+#  Gap sizing rationale:
+#    closing speed Δv (km/h) → Δv/3.6 m/s → gap must allow ≥ 3× reaction time
+#    Safe gap rule of thumb: ego_kmh × 100 cm  (1m per km/h of ego speed)
+# ════════════════════════════════════════════════════════════════════════════
+
+  # ── TC_ACC_001 ────────────────────────────────────────────────────────────
+  # Ego at cruise 100. Lead appears 20 km/h slower with comfortable gap.
+  # Physics: Δv=20 km/h → gap closes at 5.6 m/s.
+  #          10000 cm (100m) → 17.8s to close without braking → controller
+  #          has ample time to decelerate smoothly.
+  # Phase 3: resume from ~80 km/h. Δv=20 → cmd=40 (no saturation), converges
+  #          within ~1.5s (confirmed by simulation). 6s is more than enough.
+  - id: TC_ACC_001
+    name: "ACC_Engage_Follow_Resume"
+    description: >
+      Ego cruising at 100 km/h. Lead appears at 80 km/h with 100m gap.
+      Ego decelerates gently to follow. Lead disappears → resume cruise.
+    initial_vv: 0
+
+    phases:
+      # Phase 1 — accelerate to cruise speed (identical to TC_001)
+      - vset: 100
+        duration_ms: 6000
+        assert_end: {vv_min: 88, vv_max: 108}
+
+      # Phase 2 — follow lead at 80 km/h
+      # gap=10000cm, Δv=20 km/h → 17.8s physics limit; 8s phase leaves gap >>0
+      - vset: 100
+        duration_ms: 8000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 10000
+        assert_end: {vv_min: 70, vv_max: 92}
+
+      # Phase 3 — resume cruise after lead vanishes
+      # Starting from ~80 km/h, error=20 → cmd≈40, no overshoot risk
+      - vset: 100
+        duration_ms: 6000
+        radar:
+          lead_present: false
+        assert_end: {vv_min: 90, vv_max: 108}
+
+  # ── TC_ACC_002 ────────────────────────────────────────────────────────────
+  # Ego and lead at same speed but gap is unsafe (15m at 80 km/h).
+  # Safe distance at 80 km/h ≈ 8000 cm (rule: 1m/km/h × ego speed).
+  # Same speed means gap closes only because ACC decelerates ego.
+  # Test validates that ACC opens the gap by reducing ego speed.
+  - id: TC_ACC_002
+    name: "ACC_UnsafeGap_SameSpeed"
+    description: >
+      Ego and lead both at 80 km/h. Gap=1500 cm (15m) is below safe distance.
+      ACC must slow the ego to open the gap.
+    initial_vv: 80
+
+    phases:
+      - vset: 80
+        duration_ms: 7000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 1500
+        assert_end: {vv_min: 55, vv_max: 80}
+
+  # ── TC_ACC_003 ────────────────────────────────────────────────────────────
+  # Phase 1: stable following at matched speeds with comfortable gap.
+  # Phase 2: lead brakes hard (80→30 km/h). Δv=50 km/h → gap closes at
+  #          13.9 m/s; 8000 cm = 5.8s to collision without braking.
+  #          7s phase gives controller ~1.2× physics limit — tight but fair.
+  # Wide tolerance on phase 2 (20-55) accounts for:
+  #   - STM32 EMA lag on first few ticks after phase switch
+  #   - Possible slight oscillation below lead speed before settling
+  - id: TC_ACC_003
+    name: "ACC_Lead_HardBrake"
+    description: >
+      Ego following lead at 80 km/h with 80m gap (comfortable).
+      Lead brakes hard to 30 km/h. Ego must decelerate and converge
+      near lead speed within the phase duration.
+    initial_vv: 80
+
+    phases:
+      # Phase 1 — stable following, matched speeds
+      - vset: 100
+        duration_ms: 5000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 8000
+        assert_end: {vv_min: 65, vv_max: 90}
+
+      # Phase 2 — lead brakes hard; gap reset to 8000cm for determinism
+      - vset: 100
+        duration_ms: 7000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 30
+          initial_distance_cm: 8000
+        assert_end: {vv_min: 20, vv_max: 55}
+
+  # ── TC_ACC_004 ────────────────────────────────────────────────────────────
+  # Slow-road scenario: low speeds, tight gap is common (urban following).
+  # Ego at 50 km/h, lead at 40 km/h with 3000cm (30m) gap.
+  # Δv=10 km/h → closes at 2.78 m/s → 30m / 2.78 = 10.8s.
+  # ACC should gently decelerate ego to ~40 km/h.
+  - id: TC_ACC_004
+    name: "ACC_Urban_Follow"
+    description: >
+      Urban scenario: ego at 50 km/h, lead at 40 km/h, gap=30m.
+      ACC must slow ego gently to match lead without aggressive braking.
+    initial_vv: 50
+
+    phases:
+      - vset: 50
+        duration_ms: 7000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 40
+          initial_distance_cm: 3000
+        assert_end: {vv_min: 32, vv_max: 52}

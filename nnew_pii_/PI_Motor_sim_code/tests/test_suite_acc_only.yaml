@@ -1,0 +1,84 @@
+# =============================================================================
+#  HIL Test Suite — ACC Only
+#  DUT : STM32F401RETx  (MCP2515 CAN, acc_controller + speedlimiter)
+#  Pi  : hil_test_runner.py  (motor: tau=100ms, delay=250ms)
+#
+#  FORMULE D_TARGET (STM32 firmware) :
+#    d_target [cm] = (vv * 550) / 90   (division entière)
+#
+#  Distances de sécurité calculées aux vitesses clés :
+#    60 km/h  →   366 cm  ( 3.7 m)
+#    70 km/h  →   427 cm  ( 4.3 m)
+#    80 km/h  →   488 cm  ( 4.9 m)
+#    90 km/h  →   549 cm  ( 5.5 m)
+#   100 km/h  →   611 cm  ( 6.1 m)
+#
+#  RÈGLE DE CONCEPTION :
+#    - assert_end {gap_min, gap_max}  quand lead_present: true
+#      → vérifie que le gap converge vers d_target, pas la vitesse
+#    - assert_end {vv_min, vv_max}    quand lead_present: false
+#      → vérifie que le speedlimiter reprend correctement
+#
+#  LANCER :
+#    python3 hil_test_runner.py tests/test_suite_acc_only.yaml
+# =============================================================================
+
+suite:
+  name: "ACC_Validation"
+  version: "2.0"
+  description: >
+    Suite dédiée ACC. Valide l'engagement, le suivi, l'ouverture de gap
+    et la reprise du speedlimiter. Assertions ACC sur gap_cm vs d_target.
+  dut: "STM32F401RETx — acc_controller + speedlimiter"
+
+config:
+  can_interface: "can0"
+  bitrate: 500000
+  loop_period_ms: 10
+  capture_interval_ms: 100
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+
+  motor:
+    tau_ms: 10
+    delay_ms: 1
+    k_drag: 0.0
+
+
+test_cases:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TC_ACC_001 — Engagement ACC : gap trop proche → freinage pour ouvrir
+  #
+  # Ego et lead à 80 km/h, gap initial = 200 cm < d_target(80)=488 cm.
+  # ACC voit e_d = 200-488 = -288 cm → cmd négatif → freine.
+  # Lead reste à 80, ego décélère → gap s'ouvre.
+  # Assertion : gap converge vers d_target(~80 km/h) = ~488 cm ± 150 cm.
+  # ═══════════════════════════════════════════════════════════════════════════
+  - id: TC_ACC_001
+    name: "ACC_TooClose_GapOpening"
+    initial_vv: 85
+
+    phases:
+      -
+        duration_ms: 10000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 2000
+        assert_end: {gap_min: 300, gap_max: 650}
+  - id: TC_ACC_002
+    name: "ACC_TooClose_GapOpening"
+    initial_vv: 95
+
+    phases:
+      -
+        duration_ms: 100000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 100
+          initial_distance_cm: 1500
+        assert_end: {gap_min: 300, gap_max: 650}
+        
+  
+

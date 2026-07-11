@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(ls:*)",
-      "Bash(py -3 -c:*)"
+      "Bash(py -3 -c:*)",
+      "Bash(mv pi_motor_sim1erordre.py can_interface.py)",
+      "Bash(mv hil_runner.py hil_test_runner.py)",
+      "Bash(mv tests/speed_regulator.yaml tests/test_suite_speed_acc.yaml)",
+      "Bash(mv tests/speed_regulator_v2.yaml tests/test_suite_acc_calibrated.yaml)",
+      "Bash(grep -v '^$')"
     ]
   }
 }

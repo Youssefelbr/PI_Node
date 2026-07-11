@@ -1,0 +1,257 @@
+# =============================================================================
+# HIL Test Suite — Speedlimiter Only (realistic road-driving scenarios)
+# DUT : STM32F401RETx (MCP2515 CAN, acc_controller + speedlimiter)
+# Pi  : hil_test_runner.py (motor model configured below)
+#
+# SCOPE:
+#   No lead vehicle / no ACC behavior. All cases validate only the pure
+#   speedlimiter path: speedlimiter(vset, vv).
+#
+# CONTROLLER UNDER TEST:
+#   error    = vset - vv
+#   deadband = |error| < 1 km/h  -> cmd = 0
+#   cmd      = (vset - vv) * 2
+#   clamp    = ±500
+#   EMA      = cmd_f = 0.8*cmd_f + 0.2*cmd
+#
+# TEST PHILOSOPHY:
+#   These scenarios are made more realistic for road use:
+#   - common legal cruising setpoints (30, 50, 80, 100, 120 km/h)
+#   - smaller setpoint changes than extreme jumps
+#   - transitions that mimic city, ring-road, and highway usage
+#   - realistic hold and resume behaviors after driver setpoint changes
+#   - deadband and clamp checks kept only where technically meaningful
+#
+# NOTES:
+#   - cmd_f is static in STM32 firmware and can persist across test cases.
+#   - Prefer power-cycling DUT before the suite for repeatability.
+#   - hil_test_runner.py evaluates vv_min / vv_max in assert_end.
+# =============================================================================
+
+suite:
+  name: "Speedlimiter_Only_Realistic"
+  version: "2.0"
+  description: >
+    Realistic speedlimiter validation suite for normal driving situations with
+    no lead vehicle present. Covers urban cruise stabilization, moderate
+    accelerations, highway setpoint increases, controlled decelerations,
+    speed-zone transitions, resume behavior, deadband stability, and bounded
+    saturation behavior.
+  dut: "STM32F401RETx — speedlimiter"
+
+config:
+  can_interface: "can0"
+  bitrate: 500000
+  loop_period_ms: 10
+  capture_interval_ms: 100
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+
+  motor:
+    tau_ms: 100
+    delay_ms: 200
+    k_drag: 0.01
+
+test_cases:
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_001 — Urban stabilization around 50 km/h
+  # Typical use after enabling the limiter in city traffic once vehicle is
+  # already moving near the requested speed.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_001
+    name: "SPD_Urban_50_Stabilization"
+    initial_vv: 42
+
+    phases:
+      - vset: 50
+        duration_ms: 12000
+        assert_end:
+          vv_min: 47
+          vv_max: 52
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_002 — City exit to peri-urban road
+  # Driver increases target from 50 to 80 km/h, a common speed-zone transition.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_002
+    name: "SPD_City_Exit_50_to_80"
+    initial_vv: 50
+
+    phases:
+      - vset: 80
+        duration_ms: 12000
+        assert_end:
+          vv_min: 74
+          vv_max: 82
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_003 — Highway merge build-up
+  # Vehicle is already rolling on a ramp or right lane, then target rises
+  # moderately to highway speed.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_003
+    name: "SPD_Highway_Merge_80_to_110"
+    initial_vv: 78
+
+    phases:
+      - vset: 110
+        duration_ms: 15000
+        assert_end:
+          vv_min: 103
+          vv_max: 112
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_004 — Highway speed reduction due to speed limit change
+  # Common real case: 110 -> 90 km/h approaching controlled zone or traffic.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_004
+    name: "SPD_Highway_Decel_110_to_90"
+    initial_vv: 110
+
+    phases:
+      - vset: 90
+        duration_ms: 15000
+        assert_end:
+          vv_min: 86
+          vv_max: 94
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_005 — Small adjustment near operating point
+  # Driver nudges the setpoint slightly upward during stable cruise.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_005
+    name: "SPD_Fine_Adjust_100_to_104"
+    initial_vv: 100
+
+    phases:
+      - vset: 104
+        duration_ms: 10000
+        assert_end:
+          vv_min: 102
+          vv_max: 106
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_006 — Deadband hold at steady cruise
+  # Vehicle is already at target speed. Command should remain near zero and
+  # speed should stay stable.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_006
+    name: "SPD_Deadband_Hold_90"
+    initial_vv: 90
+
+    phases:
+      - vset: 90
+        duration_ms: 15000
+        assert_cmd_at_ms: 1000
+        expected_cmd: 0
+        cmd_tolerance: 5
+        assert_end:
+          vv_min: 87
+          vv_max: 93
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_007 — Multi-zone road transition
+  # Mimics route progression: urban 50, secondary road 80, then back to 50.
+  # Useful to validate repeated setpoint changes without instability.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_007
+    name: "SPD_Multi_Zone_50_80_100"
+    initial_vv: 48
+
+    phases:
+      - vset: 50
+        duration_ms: 8000
+        assert_end:
+          vv_min: 47
+          vv_max: 52
+
+      - vset: 80
+        duration_ms: 12000
+        assert_end:
+          vv_min: 73
+          vv_max: 82
+
+      - vset: 100
+        duration_ms: 15000
+        assert_end:
+          vv_min: 46
+          vv_max: 55
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_008 — Resume after manual slowdown
+  # Represents driver slowing down below stored setpoint, then system must
+  # bring speed back toward memorized target.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_008
+    name: "SPD_Resume_From_70_Back_To_100"
+    initial_vv: 70
+
+    phases:
+      - vset: 100
+        duration_ms: 15000
+        assert_end:
+          vv_min: 93
+          vv_max: 102
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_009 — Motorway cruise hold at 120 km/h
+  # Checks stability around a common highway cruising target.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_009
+    name: "SPD_Highway_120_Hold"
+    initial_vv: 116
+
+    phases:
+      - vset: 120
+        duration_ms: 15000
+        assert_end:
+          vv_min: 117
+          vv_max: 122
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_010 — Strong acceleration request but still realistic
+  # Checks positive clamp behavior with a large but plausible mismatch rather
+  # than an unrealistic jump to maximum dashboard value.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_010
+    name: "SPD_Bounded_Positive_Clamp_Check"
+    initial_vv: 0
+
+    phases:
+      - vset: 120
+        duration_ms: 1000
+        assert_cmd_at_ms: 500
+        expected_cmd: 240
+        cmd_tolerance: 60
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_011 — Strong deceleration request from highway speed
+  # Large but still plausible decrease when entering lower-speed road.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_011
+    name: "SPD_Highway_To_Urban_120_to_50"
+    initial_vv: 120
+
+    phases:
+      - vset: 50
+        duration_ms: 25000
+        assert_end:
+          vv_min: 43
+          vv_max: 58
+
+  # -------------------------------------------------------------------------
+  # TC_SPD_012 — Near-stop crawling target
+  # Realistic low-speed maneuvering use case (traffic queue / parking access),
+  # avoiding unrealistic expectation of perfect full autonomous stop.
+  # -------------------------------------------------------------------------
+  - id: TC_SPD_012
+    name: "SPD_Low_Speed_Crawl_15"
+    initial_vv: 25
+
+    phases:
+      - vset: 15
+        duration_ms: 12000
+        assert_end:
+          vv_min: 12
+          vv_max: 18

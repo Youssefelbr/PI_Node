@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>ACC HIL — Visualiseur</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--surf:#161b22;--surf2:#21262d;--border:#30363d;
+  --txt:#e6edf3;--muted:#8b949e;
+  --ego:#58a6ff;--lead:#f78166;
+  --ok:#3fb950;--warn:#d29922;--err:#f85149;--purple:#a371f7;
+}
+body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:13px;padding:12px 16px;min-height:100vh}
+h2{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+
+/* HEADER */
+.header{display:flex;align-items:center;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--border);margin-bottom:12px;flex-wrap:wrap}
+.header h1{font-size:17px;font-weight:700}
+.badge{background:var(--surf2);border:1px solid var(--border);border-radius:20px;padding:3px 10px;font-size:11px;color:var(--muted)}
+.badge.on{border-color:var(--ego);color:var(--ego)}
+label.file-btn{background:var(--surf2);border:1px solid var(--border);border-radius:6px;color:var(--txt);padding:5px 12px;cursor:pointer;font-size:12px;display:inline-flex;align-items:center;gap:6px;transition:border-color .15s}
+label.file-btn:hover{border-color:var(--ego)}
+input[type=file]{display:none}
+
+/* CARDS */
+.card{background:var(--surf);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:10px}
+canvas{display:block;width:100%;height:auto}
+
+/* CONTROLS */
+.controls{display:flex;align-items:center;gap:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-bottom:10px;flex-wrap:wrap}
+.btn{background:var(--surf2);border:1px solid var(--border);border-radius:6px;color:var(--txt);padding:5px 11px;cursor:pointer;font-size:13px;min-width:34px;text-align:center;transition:all .15s}
+.btn:hover{border-color:var(--ego);color:var(--ego)}
+.btn.on{background:var(--ego);border-color:var(--ego);color:#000;font-weight:700}
+.btn:disabled{opacity:.35;cursor:default}
+.sp-btn{font-size:11px;min-width:40px}
+input[type=range]{flex:1;min-width:140px;height:4px;appearance:none;background:var(--surf2);border-radius:2px;outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{appearance:none;width:14px;height:14px;border-radius:50%;background:var(--ego);cursor:pointer}
+#tdisplay{font-size:11px;color:var(--muted);white-space:nowrap;min-width:90px;font-variant-numeric:tabular-nums}
+
+/* DASHBOARD */
+.dash{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:10px}
+.dc{background:var(--surf);border:1px solid var(--border);border-radius:8px;padding:10px 10px 8px;text-align:center}
+.dc .lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px}
+.dc .val{font-size:24px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+.dc .unit{font-size:10px;color:var(--muted);margin-top:1px}
+.dc .sub{font-size:10px;color:var(--muted);margin-top:4px}
+.ego .val{color:var(--ego)} .lead-c .val{color:var(--lead)}
+.gap-c .val{color:var(--ok)} .gap-c.close .val{color:var(--err)} .gap-c.far .val{color:var(--warn)}
+.cmd-c .val{color:var(--purple)}
+
+/* GAP BAR */
+.gap-bar-section{background:var(--surf);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:10px}
+#gap-bar-inner{margin-top:6px}
+
+/* CHART HEADER */
+.chart-hdr{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border)}
+.legend{display:flex;gap:14px;font-size:10px;color:var(--muted)}
+.ld{display:inline-block;width:12px;height:3px;border-radius:2px;vertical-align:middle;margin-right:3px}
+
+/* PLACEHOLDER */
+#placeholder{text-align:center;padding:60px;color:var(--muted);font-size:15px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🚗 ACC HIL Visualiseur</h1>
+  <label class="file-btn">
+    📂 Charger CSV log
+    <input type="file" id="csvIn" accept=".csv">
+  </label>
+  <span class="badge" id="tcBadge">Aucun fichier</span>
+  <span class="badge" id="ptsBadge"></span>
+</div>
+
+<div id="placeholder">Charger un fichier <code>log_TC_ACC_C_*.csv</code> pour démarrer la simulation.</div>
+<div id="app" style="display:none">
+
+  <!-- Road scene -->
+  <div class="card">
+    <canvas id="roadCanvas" width="900" height="210"></canvas>
+  </div>
+
+  <!-- Gap bar -->
+  <div class="gap-bar-section">
+    <h2>Indicateur de distance</h2>
+    <div id="gap-bar-inner"></div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <button class="btn" id="playBtn">▶</button>
+    <button class="btn" id="pauseBtn">⏸</button>
+    <button class="btn" id="resetBtn">↺</button>
+    <input type="range" id="timeline" min="0" max="1000" value="0">
+    <span id="tdisplay">0.0 s</span>
+    <span style="color:var(--muted);font-size:11px">Vitesse :</span>
+    <button class="btn sp-btn" data-sp="0.25">¼x</button>
+    <button class="btn sp-btn" data-sp="0.5">½x</button>
+    <button class="btn sp-btn on" data-sp="1">1x</button>
+    <button class="btn sp-btn" data-sp="2">2x</button>
+    <button class="btn sp-btn" data-sp="5">5x</button>
+    <button class="btn sp-btn" data-sp="10">10x</button>
+  </div>
+
+  <!-- Dashboard -->
+  <div class="dash">
+    <div class="dc ego">
+      <div class="lbl">🚗 Ego Speed</div>
+      <div class="val" id="dEgo">—</div>
+      <div class="unit">km/h</div>
+      <div class="sub">VSET : <span id="dVset">—</span></div>
+    </div>
+    <div class="dc lead-c" id="dcLead">
+      <div class="lbl">🚙 Lead Speed</div>
+      <div class="val" id="dLead">—</div>
+      <div class="unit">km/h</div>
+      <div class="sub">estimée (∂gap/∂t)</div>
+    </div>
+    <div class="dc gap-c" id="dcGap">
+      <div class="lbl">📏 Distance</div>
+      <div class="val" id="dGap">—</div>
+      <div class="unit">cm</div>
+      <div class="sub">d_target : <span id="dTarget">—</span> cm</div>
+    </div>
+    <div class="dc cmd-c">
+      <div class="lbl">⚡ CMD ACC</div>
+      <div class="val" id="dCmd">—</div>
+      <div class="unit">/ ±500</div>
+      <div class="sub" id="dCmdSub">—</div>
+    </div>
+    <div class="dc">
+      <div class="lbl">🎯 Leader</div>
+      <div class="val" style="font-size:17px" id="dLp">—</div>
+      <div class="unit"></div>
+      <div class="sub">présent</div>
+    </div>
+  </div>
+
+  <!-- History chart -->
+  <div class="card">
+    <div class="chart-hdr">
+      <h2>Historique Gap &amp; Vitesses</h2>
+      <div class="legend">
+        <span><span class="ld" style="background:var(--ego)"></span>gap (cm)</span>
+        <span><span class="ld" style="background:var(--ok);opacity:.6"></span>d_target</span>
+        <span><span class="ld" style="background:var(--ego);opacity:.5"></span>ego speed</span>
+        <span><span class="ld" style="background:var(--lead);opacity:.5"></span>lead speed</span>
+      </div>
+    </div>
+    <canvas id="chartCanvas" width="900" height="170"></canvas>
+  </div>
+
+</div><!-- /app -->
+
+<script>
+// ─────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────
+let rows = [], maxGap = 1000;
+let frame = 0, playing = false, playSpeed = 1;
+let simTime = 0, lastTs = null, rafId = null;
+let roadOff = 0;
+const CAPTURE_MS = 100;  // log interval
+
+// ─────────────────────────────────────────────
+// CSV PARSE
+// ─────────────────────────────────────────────
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    const v = lines[i].split(',');
+    if (v.length < 7) continue;
+    const gap = v[5].trim() === '' ? null : parseFloat(v[5]);
+    out.push({
+      t_ms:        +v[0], phase_vset: +v[1],
+      vv_sent:     +v[2], cmd:        +v[3],
+      vv_model:    parseFloat(v[4]),
+      gap_cm:      gap,   lead_present: +v[6]
+    });
+  }
+  return out;
+}
+
+function preprocess(data) {
+  maxGap = 500;
+  for (const r of data) if (r.gap_cm) maxGap = Math.max(maxGap, r.gap_cm);
+  maxGap = Math.ceil(maxGap * 1.15 / 500) * 500;
+
+  // d_target & estimated lead speed
+  for (let i = 0; i < data.length; i++) {
+    const r = data[i];
+    r.d_target = Math.floor(r.vv_sent * 550 / 90);
+    const prev = data[i - 1];
+    if (i > 0 && prev && prev.gap_cm !== null && r.gap_cm !== null && r.lead_present) {
+      const dGap = r.gap_cm - prev.gap_cm;  // cm
+      const dt   = (r.t_ms - prev.t_ms) / 1000; // s
+      // gap += (v_lead - v_ego)*dt/3.6*100  →  v_lead = v_ego + dGap*3.6/(dt*100)
+      r.v_lead = Math.max(0, Math.min(250, r.vv_model + dGap * 3.6 / (dt * 100)));
+    } else {
+      r.v_lead = r.lead_present ? r.vv_model : null;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
+// CANVAS HELPERS
+// ─────────────────────────────────────────────
+function rrFill(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y);
+  ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath(); ctx.fill();
+}
+
+// ─────────────────────────────────────────────
+// CAR DRAWING (top-down)
+// ─────────────────────────────────────────────
+const CW = 68, CH = 30; // car width × height in px
+
+function drawCar(ctx, cx, cy, dark, light, label, speed, opacity=1) {
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.translate(cx, cy);
+
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,.35)';
+  ctx.beginPath();
+  ctx.ellipse(2, CH/2+4, CW/2-4, 5, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // body
+  const g = ctx.createLinearGradient(-CW/2,-CH/2,CW/2,CH/2);
+  g.addColorStop(0, light); g.addColorStop(1, dark);
+  ctx.fillStyle = g;
+  rrFill(ctx, -CW/2,-CH/2, CW, CH, 7);
+
+  // front windshield (right side = front since cars move right)
+  ctx.fillStyle = 'rgba(180,220,255,.55)';
+  rrFill(ctx, CW/2-18, -CH/2+5, 12, CH-10, 3);
+
+  // rear window
+  ctx.fillStyle = 'rgba(180,220,255,.3)';
+  rrFill(ctx, -CW/2+6, -CH/2+5, 10, CH-10, 3);
+
+  // roof (centre stripe)
+  ctx.fillStyle = 'rgba(0,0,0,.15)';
+  rrFill(ctx, -CW/2+18, -CH/2+5, CW-36, CH-10, 2);
+
+  // wheels
+  const wp = [[-CW/2+4,-CH/2-2],[CW/2-12,-CH/2-2],[-CW/2+4,CH/2-4],[CW/2-12,CH/2-4]];
+  ctx.fillStyle = '#111';
+  for (const [wx,wy] of wp) rrFill(ctx, wx, wy, 9, 6, 2);
+  ctx.fillStyle = '#555';
+  for (const [wx,wy] of wp) { ctx.beginPath(); ctx.arc(wx+4.5,wy+3,1.8,0,Math.PI*2); ctx.fill(); }
+
+  // label
+  ctx.fillStyle = 'rgba(255,255,255,.95)';
+  ctx.font = 'bold 9px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, -5, 0);
+
+  // speed badge above car
+  if (speed != null) {
+    ctx.fillStyle = 'rgba(0,0,0,.65)';
+    rrFill(ctx, -22, -CH/2-17, 44, 14, 4);
+    ctx.fillStyle = '#fff';
+    ctx.font = '9px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(Math.round(speed)+' km/h', 0, -CH/2-10);
+  }
+
+  ctx.restore();
+}
+
+function arrowHead(ctx, x, y, dir, color) {
+  ctx.save(); ctx.fillStyle = color; ctx.translate(x,y);
+  ctx.beginPath();
+  if (dir==='r'){ctx.moveTo(0,0);ctx.lineTo(-8,-4);ctx.lineTo(-8,4);}
+  else           {ctx.moveTo(0,0);ctx.lineTo(8,-4);ctx.lineTo(8,4);}
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+
+// ─────────────────────────────────────────────
+// ROAD SCENE
+// ─────────────────────────────────────────────
+function drawRoad(canvas, row) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const rTop = 55, rH = 100;  // road strip
+  const CY = rTop + rH/2;     // road centre Y
+
+  // sky / ground
+  ctx.fillStyle = '#11221a'; ctx.fillRect(0,0,W,rTop);
+  ctx.fillStyle = '#11221a'; ctx.fillRect(0,rTop+rH,W,H-rTop-rH);
+
+  // side grass
+  const gs1 = ctx.createLinearGradient(0,0,0,rTop);
+  gs1.addColorStop(0,'#162b1a'); gs1.addColorStop(1,'#263d20');
+  ctx.fillStyle = gs1; ctx.fillRect(0,0,W,rTop);
+  const gs2 = ctx.createLinearGradient(0,rTop+rH,0,H);
+  gs2.addColorStop(0,'#263d20'); gs2.addColorStop(1,'#162b1a');
+  ctx.fillStyle = gs2; ctx.fillRect(0,rTop+rH,W,H-rTop-rH);
+
+  // road
+  const rg = ctx.createLinearGradient(0,rTop,0,rTop+rH);
+  rg.addColorStop(0,'#3a3a3a'); rg.addColorStop(.5,'#484848'); rg.addColorStop(1,'#3a3a3a');
+  ctx.fillStyle = rg; ctx.fillRect(0,rTop,W,rH);
+
+  // edge lines
+  ctx.fillStyle='#ddd'; ctx.fillRect(0,rTop,W,3); ctx.fillRect(0,rTop+rH-3,W,3);
+
+  // centre dashes (scrolling)
+  ctx.save();
+  ctx.strokeStyle='#f0c040'; ctx.lineWidth=2.5;
+  ctx.setLineDash([26,18]); ctx.lineDashOffset = -(roadOff % 44);
+  ctx.beginPath(); ctx.moveTo(0,CY); ctx.lineTo(W,CY); ctx.stroke();
+  ctx.setLineDash([]); ctx.restore();
+
+  // ego fixed position
+  const EGO_CX = 110;
+
+  // compute lead position
+  const gap = row.gap_cm;
+  const avail = W - EGO_CX - CW/2 - 80; // available space for gap
+  let leadCX = null;
+  let gapPx = 0;
+
+  if (row.lead_present && gap !== null) {
+    gapPx = Math.min(gap / maxGap * avail, avail);
+    leadCX = EGO_CX + CW/2 + gapPx + CW/2;
+  }
+
+  // d_target reference vertical line
+  if (row.lead_present && row.d_target > 0) {
+    const dtPx = Math.min(row.d_target / maxGap * avail, avail);
+    const dtX  = EGO_CX + CW/2 + dtPx;
+    ctx.save();
+    ctx.strokeStyle='rgba(63,185,80,.4)'; ctx.lineWidth=1.5;
+    ctx.setLineDash([3,5]);
+    ctx.beginPath(); ctx.moveTo(dtX,rTop-2); ctx.lineTo(dtX,rTop+rH+2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle='rgba(63,185,80,.7)'; ctx.font='9px Arial'; ctx.textAlign='center';
+    ctx.fillText('d_target', dtX, rTop-6);
+    ctx.restore();
+  }
+
+  // gap bracket & measurement
+  if (leadCX && leadCX - CW/2 > EGO_CX + CW/2 + 10 && leadCX < W + CW) {
+    const x1 = EGO_CX + CW/2 + 2, x2 = leadCX - CW/2 - 2;
+    const by = CY - CH/2 - 8;
+
+    ctx.save();
+    ctx.strokeStyle='rgba(255,255,255,.3)'; ctx.lineWidth=1;
+    ctx.setLineDash([3,4]);
+    ctx.beginPath();
+    ctx.moveTo(x1,by+4); ctx.lineTo(x1,CY+CH/2+6);
+    ctx.moveTo(x2,by+4); ctx.lineTo(x2,CY+CH/2+6);
+    ctx.stroke(); ctx.setLineDash([]);
+
+    if (x2 - x1 > 20) {
+      // arrow line
+      ctx.strokeStyle='rgba(255,255,255,.5)'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(x1+5,by); ctx.lineTo(x2-5,by); ctx.stroke();
+      arrowHead(ctx, x1+5, by, 'l', 'rgba(255,255,255,.5)');
+      arrowHead(ctx, x2-5, by, 'r', 'rgba(255,255,255,.5)');
+
+      // gap label
+      const mid = (x1+x2)/2;
+      const gapM = (gap/100).toFixed(1);
+      ctx.fillStyle='rgba(255,255,255,.9)'; ctx.font='bold 10px monospace';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(gapM+' m', mid, by-9);
+    }
+    ctx.restore();
+  }
+
+  // CMD acceleration arrow on ego
+  if (Math.abs(row.cmd) > 8) {
+    const intensity = Math.min(Math.abs(row.cmd)/200,1);
+    const fwd = row.cmd > 0;
+    const col = fwd ? `rgba(88,166,255,${intensity})` : `rgba(248,81,73,${intensity})`;
+    const dx  = fwd ? CW/2 : -CW/2;
+    const len = 12 + intensity*20;
+    ctx.save(); ctx.translate(EGO_CX, CY);
+    ctx.strokeStyle=col; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.moveTo(dx,0); ctx.lineTo(dx+(fwd?1:-1)*len,0); ctx.stroke();
+    arrowHead(ctx, dx+(fwd?1:-1)*len, 0, fwd?'r':'l', col);
+    ctx.restore();
+  }
+
+  // lead car (or off-screen badge)
+  if (row.lead_present && gap !== null) {
+    if (leadCX && leadCX + CW/2 < W + 5) {
+      drawCar(ctx, leadCX, CY, '#b71c1c','#ef5350','LEAD', row.v_lead);
+    } else {
+      // off-screen: show badge
+      ctx.fillStyle='rgba(247,129,102,.15)';
+      rrFill(ctx, W-76, CY-18, 72, 36, 7);
+      ctx.strokeStyle='rgba(247,129,102,.5)'; ctx.lineWidth=1;
+      ctx.strokeRect(W-76+.5, CY-18+.5, 71, 35);
+      ctx.fillStyle='#f78166'; ctx.font='bold 9px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('LEAD ▶', W-40, CY-6);
+      ctx.fillStyle='#aaa'; ctx.font='9px monospace';
+      ctx.fillText((gap/100).toFixed(0)+' m', W-40, CY+7);
+    }
+  } else if (!row.lead_present) {
+    // ghost car (faded)
+    drawCar(ctx, W-80, CY, '#333','#555','LEAD', null, 0.18);
+  }
+
+  // ego car
+  drawCar(ctx, EGO_CX, CY, '#0d47a1','#42a5f5','EGO', row.vv_model);
+
+  // phase label (bottom right)
+  ctx.fillStyle='rgba(255,255,255,.35)'; ctx.font='10px Arial'; ctx.textAlign='right'; ctx.textBaseline='bottom';
+  ctx.fillText('VSET '+row.phase_vset+' km/h', W-8, H-6);
+}
+
+// ─────────────────────────────────────────────
+// GAP BAR
+// ─────────────────────────────────────────────
+function updateGapBar(row) {
+  const el = document.getElementById('gap-bar-inner');
+  if (!row.lead_present || row.gap_cm === null) {
+    el.innerHTML = '<div style="padding:6px 0;color:var(--muted);font-size:12px">Pas de leader — speedlimiter actif</div>';
+    return;
+  }
+  const gap = row.gap_cm, dt = row.d_target;
+  const barMax = Math.max(maxGap, dt*2);
+  const gPct   = Math.min(gap/barMax*100, 100).toFixed(1);
+  const dtPct  = Math.min(dt/barMax*100,  100).toFixed(1);
+  const delta  = Math.round(gap - dt);
+  const isClose = gap < dt * 0.7, isFar = gap > dt * 1.6;
+  const col = isClose ? 'var(--err)' : isFar ? 'var(--warn)' : 'var(--ok)';
+  const status = isClose ? '⚠ Trop proche' : isFar ? '↔ Trop loin' : '✓ Zone cible';
+  el.innerHTML = `
+    <div style="position:relative;margin-top:20px">
+      <div style="position:absolute;left:${dtPct}%;top:-17px;transform:translateX(-50%);font-size:9px;color:var(--ok);white-space:nowrap">d_target</div>
+      <div style="position:relative;height:20px;background:var(--surf2);border-radius:4px;overflow:visible">
+        <div style="position:absolute;left:0;top:0;height:100%;width:${gPct}%;background:${col};border-radius:4px;transition:width .08s"></div>
+        <div style="position:absolute;left:${dtPct}%;top:-3px;bottom:-3px;width:2px;background:var(--ok)"></div>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:11px">
+      <span style="color:${col}">${status} — Gap : <strong>${Math.round(gap)} cm</strong> (${(gap/100).toFixed(1)} m)</span>
+      <span style="color:var(--ok)">d_target : <strong>${dt} cm</strong></span>
+      <span style="color:var(--muted)">Δ : <strong style="color:${col}">${delta>0?'+':''}${delta} cm</strong></span>
+    </div>`;
+}
+
+// ─────────────────────────────────────────────
+// DASHBOARD
+// ─────────────────────────────────────────────
+function updateDash(row) {
+  document.getElementById('dEgo').textContent  = Math.round(row.vv_model);
+  document.getElementById('dVset').textContent = row.phase_vset;
+
+  const lv = document.getElementById('dLead');
+  if (row.lead_present && row.v_lead != null) {
+    lv.textContent = Math.round(row.v_lead);
+    document.getElementById('dcLead').style.opacity = '1';
+  } else {
+    lv.textContent = '—';
+    document.getElementById('dcLead').style.opacity = '.4';
+  }
+
+  const gc = document.getElementById('dcGap'), gv = document.getElementById('dGap');
+  if (row.lead_present && row.gap_cm != null) {
+    gv.textContent = Math.round(row.gap_cm);
+    const d = row.gap_cm - row.d_target;
+    gc.className = 'dc gap-c' + (d < -row.d_target*0.3 ? ' close' : d > row.d_target*0.6 ? ' far' : '');
+  } else {
+    gv.textContent = '—'; gc.className = 'dc gap-c';
+  }
+  document.getElementById('dTarget').textContent = row.d_target;
+
+  const cv = document.getElementById('dCmd'), cs = document.getElementById('dCmdSub');
+  cv.textContent = (row.cmd > 0 ? '+' : '') + row.cmd;
+  cs.textContent = row.cmd > 10 ? '↑ accélération' : row.cmd < -10 ? '↓ freinage' : '≈ maintien';
+
+  const lp = document.getElementById('dLp');
+  lp.textContent = row.lead_present ? 'OUI' : 'NON';
+  lp.style.color  = row.lead_present ? 'var(--ok)' : 'var(--err)';
+}
+
+// ─────────────────────────────────────────────
+// HISTORY CHART
+// ─────────────────────────────────────────────
+function drawChart(canvas, rows, fi) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const pL=52, pR=14, pT=14, pB=28;
+  const pw = W-pL-pR, ph = H-pT-pB;
+
+  ctx.fillStyle='#161b22'; ctx.fillRect(0,0,W,H);
+  if (!rows.length) return;
+
+  const tMax = rows[rows.length-1].t_ms;
+  const gMax = maxGap;
+  const vMax = 160;  // speed axis max
+
+  function tx(t) { return pL + t/tMax*pw; }
+  function ty_g(v){ return pT + ph - Math.min(v,gMax)/gMax*ph; }
+  function ty_v(v){ return pT + ph - Math.min(v,vMax)/vMax*ph; }
+
+  // grid (gap axis)
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=1;
+  const gStep = Math.ceil(gMax/5/500)*500;
+  ctx.font='9px monospace'; ctx.fillStyle='#8b949e'; ctx.textAlign='right';
+  for (let g=0; g<=gMax; g+=gStep) {
+    const y=ty_g(g);
+    ctx.beginPath(); ctx.moveTo(pL,y); ctx.lineTo(pL+pw,y); ctx.stroke();
+    ctx.fillText(g+'cm', pL-3, y+3);
+  }
+
+  // d_target line
+  ctx.save();
+  ctx.strokeStyle='rgba(63,185,80,.35)'; ctx.lineWidth=1.5; ctx.setLineDash([4,5]);
+  ctx.beginPath(); let first=true;
+  for (const r of rows) {
+    const x=tx(r.t_ms), y=ty_g(r.d_target);
+    if (first){ctx.moveTo(x,y);first=false;}else ctx.lineTo(x,y);
+  }
+  ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+
+  // gap line
+  ctx.strokeStyle='#58a6ff'; ctx.lineWidth=2; ctx.beginPath(); first=true;
+  for (const r of rows) {
+    if (r.gap_cm===null||!r.lead_present){first=true;continue;}
+    const x=tx(r.t_ms), y=ty_g(r.gap_cm);
+    if (first){ctx.moveTo(x,y);first=false;}else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+
+  // ego speed line (secondary axis, right)
+  ctx.strokeStyle='rgba(88,166,255,.4)'; ctx.lineWidth=1.5; ctx.setLineDash([2,3]);
+  ctx.beginPath(); first=true;
+  for (const r of rows) {
+    const x=tx(r.t_ms), y=ty_v(r.vv_model);
+    if (first){ctx.moveTo(x,y);first=false;}else ctx.lineTo(x,y);
+  }
+  ctx.stroke(); ctx.setLineDash([]);
+
+  // lead speed line
+  ctx.strokeStyle='rgba(247,129,102,.45)'; ctx.lineWidth=1.5; ctx.setLineDash([2,3]);
+  ctx.beginPath(); first=true;
+  for (const r of rows) {
+    if (!r.lead_present||r.v_lead==null){first=true;continue;}
+    const x=tx(r.t_ms), y=ty_v(r.v_lead);
+    if (first){ctx.moveTo(x,y);first=false;}else ctx.lineTo(x,y);
+  }
+  ctx.stroke(); ctx.setLineDash([]);
+
+  // current frame cursor
+  if (fi < rows.length) {
+    const cx=tx(rows[fi].t_ms);
+    ctx.fillStyle='rgba(240,193,0,.12)'; ctx.fillRect(cx-1,pT,2,ph);
+    ctx.strokeStyle='#f0c100'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(cx,pT); ctx.lineTo(cx,pT+ph); ctx.stroke();
+  }
+
+  // axes
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=1.5;
+  ctx.beginPath();
+  ctx.moveTo(pL,pT); ctx.lineTo(pL,pT+ph);
+  ctx.moveTo(pL,pT+ph); ctx.lineTo(pL+pw,pT+ph);
+  ctx.stroke();
+
+  // x labels
+  ctx.fillStyle='#8b949e'; ctx.font='9px monospace'; ctx.textAlign='center';
+  const tStep = Math.ceil(tMax/6/5000)*5000;
+  for (let t=0; t<=tMax; t+=tStep)
+    ctx.fillText((t/1000)+'s', tx(t), pT+ph+14);
+}
+
+// ─────────────────────────────────────────────
+// RENDER ONE FRAME
+// ─────────────────────────────────────────────
+function render() {
+  if (!rows.length || frame >= rows.length) return;
+  const row = rows[frame];
+  drawRoad(document.getElementById('roadCanvas'), row);
+  drawChart(document.getElementById('chartCanvas'), rows, frame);
+  updateGapBar(row);
+  updateDash(row);
+
+  const tMax = rows[rows.length-1].t_ms;
+  document.getElementById('timeline').value = (row.t_ms / tMax * 1000).toFixed(0);
+  document.getElementById('tdisplay').textContent =
+    (row.t_ms/1000).toFixed(1) + ' s / ' + (tMax/1000).toFixed(0) + ' s';
+}
+
+// ─────────────────────────────────────────────
+// ANIMATION LOOP
+// ─────────────────────────────────────────────
+function loop(ts) {
+  if (!playing) return;
+  if (lastTs === null) lastTs = ts;
+  const dt = ts - lastTs; lastTs = ts;
+  simTime += dt * playSpeed;
+  frame = Math.min(Math.floor(simTime / CAPTURE_MS), rows.length - 1);
+
+  // scroll road: ego speed km/h → px/ms * dt * scale
+  roadOff += rows[frame].vv_model * 0.014 * dt * playSpeed;
+
+  render();
+
+  if (frame >= rows.length - 1) {
+    playing = false;
+    document.getElementById('playBtn').classList.remove('on');
+    return;
+  }
+  rafId = requestAnimationFrame(loop);
+}
+
+function startPlay() {
+  if (frame >= rows.length - 1) { frame=0; simTime=0; roadOff=0; }
+  playing = true; lastTs = null;
+  document.getElementById('playBtn').classList.add('on');
+  rafId = requestAnimationFrame(loop);
+}
+function pausePlay() {
+  playing = false;
+  document.getElementById('playBtn').classList.remove('on');
+  if (rafId) cancelAnimationFrame(rafId);
+}
+function resetPlay() {
+  pausePlay(); frame=0; simTime=0; roadOff=0; lastTs=null; render();
+}
+
+// ─────────────────────────────────────────────
+// CONTROLS WIRING
+// ─────────────────────────────────────────────
+document.getElementById('playBtn').addEventListener('click', startPlay);
+document.getElementById('pauseBtn').addEventListener('click', pausePlay);
+document.getElementById('resetBtn').addEventListener('click', resetPlay);
+
+document.getElementById('timeline').addEventListener('input', e => {
+  pausePlay();
+  const pct = e.target.value / 1000;
+  const tMax = rows[rows.length-1].t_ms;
+  frame = Math.min(Math.floor(pct * tMax / CAPTURE_MS), rows.length-1);
+  simTime = frame * CAPTURE_MS; render();
+});
+
+document.querySelectorAll('.sp-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.sp-btn').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    playSpeed = parseFloat(b.dataset.sp);
+    lastTs = null; // reset dt to avoid jump
+  });
+});
+
+// ─────────────────────────────────────────────
+// FILE INPUT
+// ─────────────────────────────────────────────
+document.getElementById('csvIn').addEventListener('change', function(e) {
+  const file = e.target.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    rows = parseCSV(ev.target.result);
+    if (!rows.length) { alert('CSV vide ou invalide.'); return; }
+    preprocess(rows);
+
+    frame=0; simTime=0; roadOff=0; playing=false; lastTs=null;
+
+    // extract TC id from filename
+    const m = file.name.match(/log_(TC_ACC_C_\d+)/i);
+    document.getElementById('tcBadge').textContent = m ? m[1] : file.name.replace('.csv','');
+    document.getElementById('tcBadge').className = 'badge on';
+    document.getElementById('ptsBadge').textContent = rows.length+' points · '+(rows[rows.length-1].t_ms/1000).toFixed(0)+' s';
+
+    document.getElementById('placeholder').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    render();
+  };
+  reader.readAsText(file);
+});
+</script>
+</body>
+</html>

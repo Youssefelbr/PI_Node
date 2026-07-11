@@ -1,0 +1,315 @@
+# =============================================================================
+#  HIL Test Suite — ACC + Speedlimiter (5 vs 5)
+#  DUT : STM32F401RETx  (MCP2515 CAN, acc_controller + speedlimiter)
+#  Pi  : hil_test_runner.py  (motor: tau=10ms, delay=1ms, k_drag=0)
+#
+#  Layout:
+#    TC_ACC_001 .. TC_ACC_005  →  lead_present: true   (ACC distance controller)
+#    TC_SPD_001 .. TC_SPD_005  →  lead_present: false  (speedlimiter P-controller)
+#
+#  FIRMWARE ACC FORMULA  (d_target):
+#    d_target [cm] = (vv * 550) / 90   (integer division)
+#
+#  REFERENCE d_target VALUES:
+#    60 km/h  →   366 cm
+#    70 km/h  →   427 cm
+#    80 km/h  →   488 cm
+#    90 km/h  →   549 cm
+#   100 km/h  →   611 cm
+#
+#  ACC P-CONTROLLER (STM32 firmware):
+#    e_d    = distance_cm - d_target
+#    cmdd   = (e_d * 2) / 100         gain = 0.02 cmd/cm
+#    clamp  = ±500
+#    EMA    = alpha=0.2  (~40 ms settling at 10 ms loop)
+#    dead zone: |e_d| < 50 cm  →  cmdd rounds to 0 (integer division)
+#
+#  SPEEDLIMITER P-CONTROLLER (STM32 firmware, no lead):
+#    deadband ±1 km/h on error
+#    cmd    = (vset - vv) * 2         gain = 2 cmd/(km/h)
+#    clamp  = ±500
+#    EMA    = alpha=0.2
+#
+#  ⚠  RUNNER BUG: gap_min / gap_max in assert_end are silently ignored by
+#     hil_test_runner.py (only vv_min / vv_max is evaluated). Both assertion
+#     types are written here for documentation/future activation.
+#
+#  LANCER:
+#    python3 hil_test_runner.py tests/test_suite_acc_speedlimiter_5v5.yaml
+# =============================================================================
+
+suite:
+  name: "ACC_Speedlimiter_5v5"
+  version: "1.0"
+  description: >
+    Mixed validation suite: 5 ACC test cases (lead vehicle present, distance
+    P-controller) and 5 speedlimiter test cases (no lead, speed P-controller).
+  dut: "STM32F401RETx — acc_controller + speedlimiter"
+
+config:
+  can_interface: "can0"
+  bitrate: 500000
+  loop_period_ms: 10
+  capture_interval_ms: 100
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+
+  motor:
+    tau_ms: 10         # fast plant — motor settles in ~30 ms
+    delay_ms: 1
+    k_drag: 0.0
+
+
+test_cases:
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # ── ACC test cases (lead_present: true) ──────────────────────────────────
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_001 — Gap Far Away: positive error → ego must accelerate to close
+  #
+  # Ego and lead both at 80 km/h. Initial gap = 3000 cm >> d_target(80)=488 cm.
+  # e_d = +2512 cm → cmdd = (2512×2)/100 = 50. Ego rises above 80, gap closes.
+  # Equilibrium: v_ego → 80 km/h, gap → 488 cm.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_001
+    name: "ACC_GapFarAway_PositiveError"
+    initial_vv: 80
+
+    phases:
+      - vset: 100
+        duration_ms: 60000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 3000
+        assert_end:
+          vv_min: 70
+          vv_max: 95
+          gap_min: 250
+          gap_max: 700
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_002 — Gap Too Close: negative error → ego must brake to open gap
+  #
+  # Ego and lead at 80 km/h. Initial gap = 100 cm << d_target(80)=488 cm.
+  # e_d = -388 → cmdd = (-388×2)/100 = -7. Ego decelerates below lead, gap opens.
+  # Equilibrium: gap → 488 cm, ego → 80 km/h.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_002
+    name: "ACC_GapTooClose_NegativeError"
+    initial_vv: 80
+
+    phases:
+      - vset: 100
+        duration_ms: 40000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 95
+          initial_distance_cm: 100
+        assert_end:
+          vv_min: 63
+          vv_max: 83
+          gap_min: 150
+          gap_max: 600
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_003 — Gap At Target: steady-state stability
+  #
+  # Ego and lead at 80 km/h, gap initialised exactly at d_target(80)=488 cm.
+  # e_d = 0 → dead-zone → cmdd = 0. System should stay stable.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_003
+    name: "ACC_GapAtTarget_Stability"
+    initial_vv: 80
+
+    phases:
+      - vset: 100
+        duration_ms: 20000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 75
+          initial_distance_cm: 488
+        assert_end:
+          vv_min: 74
+          vv_max: 86
+          gap_min: 350
+          gap_max: 650
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_004 — Lead Hard Brakes: gap collapses, ACC must brake ego quickly
+  #
+  # Phase 1: stable following at 80/80, gap=800 cm. 10 s to establish.
+  # Phase 2: lead drops suddenly to 30 km/h, gap reset to 800 cm.
+  #          Δv = 50 km/h → gap closes fast → ACC commands strong deceleration.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_004
+    name: "ACC_LeadHardBrakes_EmergencyDecel"
+    initial_vv: 80
+
+    phases:
+      # Phase 1 — stable following
+      - vset: 100
+        duration_ms: 10000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 104
+          initial_distance_cm: 800
+        assert_end:
+          vv_min: 65
+          vv_max: 90
+
+      # Phase 2 — lead brakes hard
+      - vset: 100
+        duration_ms: 30000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 30
+          initial_distance_cm: 800
+        assert_end:
+          vv_min: 15
+          vv_max: 55
+          gap_min: 100
+          gap_max: 700
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_ACC_005 — Cut-In: lead vehicle suddenly appears close while cruising
+  #
+  # Phase 1: speedlimiter, vset=80, ego stabilises at ~80 km/h. 10 s.
+  # Phase 2: lead cuts in at 80 km/h, gap=200 cm (well below d_target=488 cm).
+  #          ACC must immediately brake to open the gap.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_ACC_005
+    name: "ACC_CutIn_CloseGap"
+    initial_vv: 80
+
+    phases:
+      # Phase 1 — cruise (no lead)
+      - vset: 80
+        duration_ms: 10000
+        radar:
+          lead_present: false
+        assert_end:
+          vv_min: 73
+          vv_max: 87
+
+      # Phase 2 — lead cuts in close
+      - vset: 80
+        duration_ms: 30000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 200
+        assert_end:
+          vv_min: 60
+          vv_max: 82
+          gap_min: 150
+          gap_max: 600
+
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # ── Speedlimiter test cases (lead_present: false / no radar block) ───────
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_001 — Step Response Acceleration
+  #
+  # Vehicle starts from rest (0 km/h). Setpoint jumps to 100 km/h.
+  # Validates the controller drives speed up and converges within 5 s.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_001
+    name: "SPD_Step_Response_Acceleration"
+    initial_vv: 0
+
+    phases:
+      - vset: 100
+        duration_ms: 5000
+        radar:
+          lead_present: false
+        assert_end:
+          vv_min: 80
+          vv_max: 110
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_002 — Multi-Step Ramp
+  #
+  # Vehicle starts at 10 km/h. Setpoint steps to 80 km/h (3 s) then
+  # 150 km/h (3 s). Validates convergence at each operating point.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_002
+    name: "SPD_Multi_Step_Ramp"
+    initial_vv: 10
+
+    phases:
+      - vset: 80
+        duration_ms: 3000
+        radar:
+          lead_present: false
+        assert_end:
+          vv_min: 65
+          vv_max: 90
+
+      - vset: 150
+        duration_ms: 3000
+        assert_end:
+          vv_min: 130
+          vv_max: 160
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_003 — Deceleration Check
+  #
+  # Vehicle cruising at 150 km/h. Setpoint drops sharply to 40 km/h.
+  # Controller must output a negative command to brake the motor.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_003
+    name: "SPD_Deceleration_Check"
+    initial_vv: 150
+
+    phases:
+      - vset: 40
+        duration_ms: 4000
+        assert_end:
+          vv_min: 28
+          vv_max: 52
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_004 — Setpoint Hold Stability
+  #
+  # Vehicle accelerates from 0 to 100 km/h (5 s to converge), then the
+  # setpoint is held at 100 km/h for 4 s. Validates no drift once settled.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_004
+    name: "SPD_Setpoint_Hold_Stability"
+    initial_vv: 0
+
+    phases:
+      - vset: 100
+        duration_ms: 5000
+        assert_end:
+          vv_min: 80
+          vv_max: 110
+
+      - vset: 100
+        duration_ms: 4000
+        assert_end:
+          vv_min: 85
+          vv_max: 110
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TC_SPD_005 — Fine Tracking / Small Step Near Deadband
+  #
+  # Vehicle cruising at 60 km/h. Setpoint nudges to 65 km/h (small error,
+  # just outside the ±1 km/h deadband). Validates fine-grained tracking
+  # without overshoot from the P-controller + EMA.
+  # ─────────────────────────────────────────────────────────────────────────
+  - id: TC_SPD_005
+    name: "SPD_Fine_Tracking_Small_Step"
+    initial_vv: 60
+
+    phases:
+      - vset: 65
+        duration_ms: 2000
+        assert_end:
+          vv_min: 60
+          vv_max: 68

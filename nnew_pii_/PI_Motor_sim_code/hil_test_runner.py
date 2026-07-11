@@ -21,9 +21,56 @@ import csv
 import yaml
 from collections import deque
 from datetime import datetime
+import socket
+import json
+UDP_IP = "192.168.11.104"   # IP du PC sur le réseau local
+UDP_PORT = 5005
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def send_speed(speed,lead_present,vset_):
+    msg = json.dumps({                                                                                                                                                 
+          "speed": speed,
+          "lead_present": lead_present,
+          "setpoint_speed":vset_,
+          "speed_reg":      True,          # ← manquant
+                                            }).encode("utf-8")
+    sock.sendto(msg, (UDP_IP, UDP_PORT))
+
 
 # Reuse the CAN helpers from the motor simulator — single source of truth
-from pi_motor_sim1erordre import read_accel_int16, send_vset_vv_u16
+from can_interface import read_accel_int16, send_vset_vv_u16, send_radar_frame
+
+
+# ---------------------------------------------------------------------------
+# Motor model
+# ---------------------------------------------------------------------------
+
+def motor_step(a_cmd, a_eff, v, delay_line, tau, k_drag, Ts):
+    """
+    Advance the motor model by one tick (Ts seconds).
+
+    Inputs:
+        a_cmd      : acceleration command from STM32 this tick (float, ±500)
+        a_eff      : current effective acceleration (filter state)
+        v          : current speed (km/h)
+        delay_line : deque representing the transport delay
+        tau        : inertia time constant (seconds)
+        k_drag     : drag coefficient
+        Ts         : loop period (seconds)
+
+    Returns:
+        (a_eff, v) : updated filter state and speed
+    """
+    delay_line.append(a_cmd)
+    a_delayed = delay_line[0]
+
+    alpha = min(Ts / tau, 1.0)
+    a_eff = a_eff + alpha * (a_delayed - a_eff)
+
+    v = v + (a_eff - k_drag * v) * Ts
+    if v < 0.0:
+        v = 0.0
+
+    return a_eff, v
 
 
 # ---------------------------------------------------------------------------
@@ -60,31 +107,25 @@ def run_test_case(bus, tc: dict, cfg: dict, motor_params: dict):
         pass
 
     for phase_idx, phase in enumerate(tc["phases"]):
-        vset      = phase["vset"]
+        vset      = phase.get("vset", 0)
         vset_u16  = int(vset)
         phase_ticks = phase["duration_ms"] // cfg["loop_period_ms"]
+        radar      = phase.get("radar", {})
+        lead_pres  = radar.get("lead_present", False)
+        v_lead     = float(radar.get("lead_speed_kmh", 0))
+        gap_cm     = float(radar["initial_distance_cm"]) if ("initial_distance_cm" in radar) else None
 
         for phase_tick in range(phase_ticks):
             t_next = time.monotonic() + Ts
 
-            # ---- Step 1 : read CMD from STM32 (response to previous 0x100) ----
-            a_cmd = read_accel_int16(bus)
-            if a_cmd is None:
-                a_cmd = float(delay_line[-1])   # keep last value on timeout
-            a_cmd = float(a_cmd)
+            
+            # ---- Lead vehicle gap dynamics (1 km/h = 0.2778 cm per 10 ms tick) ----
+            if lead_pres and gap_cm is not None:
+                gap_cm += (v_lead - v) *(Ts/3.6)*100.0
+                gap_cm  = max(gap_cm, 0.0)
 
-            # ---- Step 2 : motor model update --------
-            delay_line.append(a_cmd)
-            a_delayed = delay_line[0]
-
-            alpha = Ts / tau
-            if alpha > 1.0:
-                alpha = 1.0
-            a_eff = a_eff + alpha * (a_delayed - a_eff)
-
-            v = v + (a_eff - k_drag * v) * Ts
-            if v < 0.0:
-                v = 0.0
+            d_send = int(gap_cm) if (lead_pres and gap_cm is not None) else 0
+            send_radar_frame(bus, d_send, int(v_lead), lead_pres)
 
             vv_u16 = int(v)
             if vv_u16 > 65535:
@@ -92,7 +133,25 @@ def run_test_case(bus, tc: dict, cfg: dict, motor_params: dict):
 
             # ---- Step 3 : send [VSET, VV] to STM32 via CAN 0x100 ----
             send_vset_vv_u16(bus, vset_u16, vv_u16)
+            #UDP send datagramme """"""""""""""""""""""""""""""""""""""""
+            send_speed(vv_u16,lead_pres,vset_u16)
 
+
+
+
+            #UDP end sending
+            #-------------------------paliative : 
+            # ---- Step 1 : read CMD from STM32 (response to previous 0x100) ----
+            a_cmd = read_accel_int16(bus)
+            if a_cmd is None:
+                a_cmd = float(delay_line[-1])   # keep last value on timeout
+            a_cmd = float(a_cmd)
+
+            # ---- Step 2 : motor model update --------
+            a_eff, v = motor_step(a_cmd, a_eff, v, delay_line, tau, k_drag, Ts)
+
+            #-------------------------paliative end
+            #changement de read accel avec la position en au ------->1
             # ---- assert_cmd_at_ms ------------------------------------------
             if "assert_cmd_at_ms" in phase:
                 t_in_phase_ms = phase_tick * cfg["loop_period_ms"]
@@ -110,11 +169,14 @@ def run_test_case(bus, tc: dict, cfg: dict, motor_params: dict):
             # ---- Capture snapshot ------------------------------------------
             if tick % capture_every == 0:
                 log_rows.append({
-                    "t_ms":       t_ms,
-                    "phase_vset": vset,
-                    "vv_sent":    vv_u16,
-                    "cmd":        int(a_cmd),
-                    "vv_model":   round(v, 2),
+                    "t_ms":         t_ms,
+                    "phase_vset":   vset,
+                    "vv_sent":      vv_u16,
+                    "cmd":          int(a_cmd),
+                    "vv_model":     round(v, 2),
+                    "gap_cm":       round(gap_cm, 1) if gap_cm is not None else "",
+                    "lead_present": int(lead_pres),
+                    "lead_speed_kmh": v_lead if lead_pres else "",
                 })
 
             tick  += 1
@@ -126,13 +188,21 @@ def run_test_case(bus, tc: dict, cfg: dict, motor_params: dict):
 
         # ---- End-of-phase assertion -----------------------------------------
         if "assert_end" in phase:
-            ae     = phase["assert_end"]
-            vv_end = int(v)
-            passed = ae["vv_min"] <= vv_end <= ae["vv_max"]
-            assertions.append((
-                f"Phase {phase_idx + 1} end VV={vv_end} ∈ [{ae['vv_min']}, {ae['vv_max']}]",
-                passed,
-            ))
+            ae = phase["assert_end"]
+            if "vv_min" in ae:
+                vv_end = int(v)
+                passed = ae["vv_min"] <= vv_end <= ae["vv_max"]
+                assertions.append((
+                    f"Phase {phase_idx + 1} end VV={vv_end} ∈ [{ae['vv_min']}, {ae['vv_max']}]",
+                    passed,
+                ))
+            if "gap_min" in ae:
+                gap_end = gap_cm if gap_cm is not None else 0.0
+                passed = ae["gap_min"] <= gap_end <= ae["gap_max"]
+                assertions.append((
+                    f"Phase {phase_idx + 1} end GAP={round(gap_end, 1)} ∈ [{ae['gap_min']}, {ae['gap_max']}]",
+                    passed,
+                ))
 
     return log_rows, assertions
 
@@ -145,10 +215,26 @@ def write_csv(log_rows: list, path: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["t_ms", "phase_vset", "vv_sent", "cmd", "vv_model"]
+            f, fieldnames=["t_ms", "phase_vset", "vv_sent", "cmd", "vv_model", "gap_cm", "lead_present", "lead_speed_kmh"]
         )
         writer.writeheader()
         writer.writerows(log_rows)
+
+
+def write_global_csv(results: list, path: str) -> None:
+    """Write a single CSV combining every test case's rows, tagged with tc_id/tc_name."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fieldnames = [
+        "tc_id", "tc_name", "t_ms", "phase_vset", "vv_sent", "cmd",
+        "vv_model", "gap_cm", "lead_present", "lead_speed_kmh",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in results:
+            tc = r["tc"]
+            for row in r["log_rows"]:
+                writer.writerow({"tc_id": tc["id"], "tc_name": tc["name"], **row})
 
 
 def write_report(suite_meta, motor_params, results, timestamp, path):
@@ -188,7 +274,7 @@ def write_report(suite_meta, motor_params, results, timestamp, path):
             phase_rows   = [r for r in log_rows if phase_start_t <= r["t_ms"] < phase_end_t]
 
             lines += [
-                f"### Phase {pi + 1} — VSET = {phase['vset']} km/h "
+                f"### Phase {pi + 1} — VSET = {phase.get('vset', 'N/A')} km/h "
                 f"({phase_start_t} ms → {phase_end_t} ms)",
                 "",
                 "| t (ms) | VSET | VV (km/h) | CMD (accel) |",
@@ -268,6 +354,12 @@ def main():
             print()
 
             results.append({"tc": tc, "log_rows": log_rows, "assertions": assertions})
+
+    global_csv_path = os.path.join(
+        cfg["logs_dir"], f"log_ALL_{suite_name}_{timestamp}.csv"
+    )
+    write_global_csv(results, global_csv_path)
+    print(f"Global CSV: {global_csv_path}")
 
     report_path = os.path.join(
         cfg["reports_dir"], f"report_{suite_name}_{timestamp}.md"
