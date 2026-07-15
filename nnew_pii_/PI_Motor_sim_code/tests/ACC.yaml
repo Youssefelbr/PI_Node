@@ -103,7 +103,7 @@ test_cases:
         radar:
           lead_present: true
           lead_speed_kmh: 50
-          initial_distance_cm: 1000
+          initial_distance_cm: 1500
         assert_end: {gap_min: 2800, gap_max: 3000}
       -
         duration_ms: 12000

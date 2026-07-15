@@ -30,12 +30,12 @@ test_cases:
 
     phases:
       -
-        duration_ms: 12000
+        duration_ms: 23000
         radar:
           lead_present: true
           lead_speed_kmh: 80
           initial_distance_cm: 2000
-        assert_end: {gap_min: 4500, gap_max: 4900}
+        assert_end: {gap_min: 5000, gap_max: 5100}
 
   - id: TC_ACC_002
     name: "ACC_LeadProgressiveAccel_80to90"
@@ -44,72 +44,70 @@ test_cases:
     phases:
       # Phase 1: steady-state at 80 km/h, gap settled at d_target(80) = 488 cm
       -
-        duration_ms: 8000
+        duration_ms: 14000
         radar:
           lead_present: true
-          lead_speed_kmh: 80
-          initial_distance_cm: 2500
-        assert_end: {gap_min: 4500, gap_max: 5000}
+          lead_speed_kmh: 95
+          initial_distance_cm: 5088
+        assert_end: {gap_min: 5600, gap_max: 6100}
 
       # Phase 2: lead accelerates progressively from 80 to 90 km/h over 10 s
       -
-        duration_ms: 10000
+        duration_ms: 14000
         radar:
           lead_present: true
-          lead_speed_kmh_start: 80
-          lead_speed_kmh_end: 90
+          lead_speed_kmh_start: 95
+          lead_speed_kmh_end: 112
           lead_accel_mps2: 0.28   # ≈1.0 km/h/s, accel douce -> atteint 90 km/h en ~10s (== duration_ms)
          # initial_distance_cm: 4644
+        assert_end: {gap_min: 6500, gap_max: 6700}
 
       # Phase 3: lead holds 90 km/h, let ACC catch up to the new d_target(90) = 549 cm
       -
-        duration_ms: 12000
+        duration_ms: 14000
         radar:
           lead_present: true
-          lead_speed_kmh: 90
-        assert_end: {gap_min: 5100, gap_max: 5500}
+          lead_speed_kmh: 112
+        assert_end: {gap_min: 6200, gap_max: 6700}
   - id: TC_ACC_003
-    name: "ACC_LeadProgressiveAccel_80to90"
+    name: "ACC_LeadProgressivedeccel_112to90"
     initial_vv: 90
 
     phases:
       -
-        duration_ms: 9000
+        duration_ms: 14000
+        radar:
+          lead_present: true
+          lead_speed_kmh_start: 112
+          lead_speed_kmh_end: 90
+          lead_accel_mps2: -0.62   # ≈-2.2 km/h/s, freinage ferme -> 70 km/h en ~9s (== duration_ms)
+          initial_distance_cm: 6560
+        assert_end: {gap_min: 5900, gap_max: 6000}
+      -
+        duration_ms: 14000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 90
+        assert_end: {gap_min: 6000, gap_max: 6250}
+      -
+        duration_ms: 28000
         radar:
           lead_present: true
           lead_speed_kmh_start: 90
-          lead_speed_kmh_end: 70
-          lead_accel_mps2: -0.62   # ≈-2.2 km/h/s, freinage ferme -> 70 km/h en ~9s (== duration_ms)
-          initial_distance_cm: 5139
-        assert_end: {gap_min: 4500, gap_max: 5000}
-      -
-        duration_ms: 12000
-        radar:
-          lead_present: true
-          lead_speed_kmh: 70
-        assert_end: {gap_min: 5100, gap_max: 5500}
-      -
-        duration_ms: 9000
-        radar:
-          lead_present: true
-          lead_speed_kmh_start: 70
           lead_speed_kmh_end: 50
-          lead_accel_mps2: -0.42   # ≈-2.2 km/h/s, freinage ferme -> 70 km/h en ~9s (== duration_ms)
-        assert_end: {gap_min: 4500, gap_max: 5000}
+          lead_accel_mps2: -0.72   # ≈-2.2 km/h/s, freinage ferme -> 70 km/h en ~9s (== duration_ms)
+        assert_end: {gap_min: 5900, gap_max: 6100}
       -
-        duration_ms: 12000
-        radar:
-          lead_present: true
-          lead_speed_kmh: 50
-        assert_end: {gap_min: 5100, gap_max: 5500}
-      -
-        duration_ms: 10000
+        duration_ms: 28000
         radar:
           lead_present: true
           lead_speed_kmh_start: 50
-          lead_speed_kmh_end: 80
-          lead_accel_mps2: -0.22   # ≈-2.2 km/h/s, freinage ferme -> 70 km/h en ~9s (== duration_ms)
-        assert_end: {gap_min: 4500, gap_max: 5000}
+          lead_speed_kmh_end: 1
+          lead_accel_mps2: -1.0   # ≈-2.2 km/h/s, freinage ferme -> 70 km/h en ~9s (== duration_ms)
+        assert_end: {gap_min: 5900, gap_max: 6100}
+      
+     
+      
 
       
      

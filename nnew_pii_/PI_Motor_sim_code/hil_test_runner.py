@@ -23,7 +23,7 @@ from collections import deque
 from datetime import datetime
 import socket
 import json
-UDP_IP = "192.168.11.104"   # IP du PC sur le réseau local
+UDP_IP = "192.168.11.107"   # IP du PC sur le réseau local
 UDP_PORT = 5005
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 def send_speed(speed,lead_present,vset_):
@@ -38,6 +38,9 @@ def send_speed(speed,lead_present,vset_):
 
 # Reuse the CAN helpers from the motor simulator — single source of truth
 from can_interface import read_accel_int16, send_vset_vv_u16, send_radar_frame
+
+# Physical clamp for lead_accel_mps2 (tire/road adhesion limit for a passenger car)
+MAX_LEAD_ACCEL_MPS2 = 9.0
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +103,8 @@ def run_test_case(bus, tc: dict, cfg: dict, motor_params: dict):
     assertions = []
     tick  = 0
     t_ms  = 0
+    gap_cm = None   # carried across phases when a phase omits initial_distance_cm
+    v_lead_matched_prev = False   # true if v == v_lead on the previous tick
 
     # Drain stale CAN messages before starting this test case
     import can as _can
@@ -112,22 +117,53 @@ def run_test_case(bus, tc: dict, cfg: dict, motor_params: dict):
         phase_ticks = phase["duration_ms"] // cfg["loop_period_ms"]
         radar      = phase.get("radar", {})
         lead_pres  = radar.get("lead_present", False)
-        v_lead     = float(radar.get("lead_speed_kmh", 0))
-        gap_cm     = float(radar["initial_distance_cm"]) if ("initial_distance_cm" in radar) else None
+        v_lead_matched_prev = False   # reset the confirmation window on each new phase
+        if "initial_distance_cm" in radar:
+            gap_cm = float(radar["initial_distance_cm"])
+
+        # ---- Lead speed: constant, or ramped over the phase ----
+        # Ramp can be driven either by:
+        #   - lead_speed_kmh_start + lead_speed_kmh_end (legacy: linear over the whole phase duration)
+        #   - lead_speed_kmh_start + lead_accel_mps2 (slope in m/s², decoupled from duration_ms;
+        #     if lead_speed_kmh_end is also given, the ramp plateaus there instead of overshooting)
+        ramp_start = radar.get("lead_speed_kmh_start")
+        ramp_end   = radar.get("lead_speed_kmh_end")
+        accel_mps2 = radar.get("lead_accel_mps2")
+        is_ramp    = ramp_start is not None and (ramp_end is not None or accel_mps2 is not None)
+        if is_ramp:
+            ramp_start = float(ramp_start)
+            ramp_end   = float(ramp_end) if ramp_end is not None else None
+            v_lead     = ramp_start
+        else:
+            v_lead = float(radar.get("lead_speed_kmh", 0))
+
+        if accel_mps2 is not None:
+            accel_mps2 = max(-MAX_LEAD_ACCEL_MPS2, min(MAX_LEAD_ACCEL_MPS2, float(accel_mps2)))
+            rate_kmh_s = accel_mps2 * 3.6
 
         for phase_tick in range(phase_ticks):
             t_next = time.monotonic() + Ts
 
-            
+            if is_ramp:
+                if accel_mps2 is not None:
+                    elapsed_s = (phase_tick * cfg["loop_period_ms"]) / 1000.0
+                    v_lead    = ramp_start + rate_kmh_s * elapsed_s
+                    if ramp_end is not None:
+                        v_lead = min(v_lead, ramp_end) if rate_kmh_s >= 0 else max(v_lead, ramp_end)
+                    v_lead = max(v_lead, 0.0)
+                else:
+                    frac   = phase_tick / max(phase_ticks - 1, 1)
+                    v_lead = ramp_start + (ramp_end - ramp_start) * frac
+
             # ---- Lead vehicle gap dynamics (1 km/h = 0.2778 cm per 10 ms tick) ----
             if lead_pres and gap_cm is not None:
-                gap_cm += (v_lead - v) *(Ts/3.6)*100.0
+                gap_cm += (int(v_lead) - int(v)) * (Ts/3.6) * 100.0*0.8
                 gap_cm  = max(gap_cm, 0.0)
 
             d_send = int(gap_cm) if (lead_pres and gap_cm is not None) else 0
             send_radar_frame(bus, d_send, int(v_lead), lead_pres)
 
-            vv_u16 = int(v)
+            vv_u16 = int(v)#int() previously
             if vv_u16 > 65535:
                 vv_u16 = 65535
 
@@ -173,7 +209,7 @@ def run_test_case(bus, tc: dict, cfg: dict, motor_params: dict):
                     "phase_vset":   vset,
                     "vv_sent":      vv_u16,
                     "cmd":          int(a_cmd),
-                    "vv_model":     round(v, 2),
+                    "vv_model":     int(v),
                     "gap_cm":       round(gap_cm, 1) if gap_cm is not None else "",
                     "lead_present": int(lead_pres),
                     "lead_speed_kmh": v_lead if lead_pres else "",

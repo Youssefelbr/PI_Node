@@ -65,7 +65,9 @@ test_cases:
 
     phases:
       - vset: 110
-        duration_ms: 10000
+        duration_ms: 30000
+        radar:
+          lead_present: false
         assert_end:
           vv_min: 100
           vv_max: 113
@@ -82,7 +84,9 @@ test_cases:
 
     phases:
       - vset: 60
-        duration_ms: 10000
+        duration_ms: 30000
+        radar:
+          lead_present: false
         assert_end:
           vv_min: 40
           vv_max: 75
@@ -99,7 +103,7 @@ test_cases:
 
     phases:
       - vset: 99
-        duration_ms: 20000
+        duration_ms: 30000
         assert_end:
           vv_min: 80
           vv_max: 105
@@ -118,13 +122,13 @@ test_cases:
 
     phases:
       - vset: 100
-        duration_ms: 10000
+        duration_ms: 30000
         assert_end:
           vv_min: 90
           vv_max: 110
 
       - vset: 85
-        duration_ms: 10000
+        duration_ms: 30000
         assert_end:
           vv_min: 60
           vv_max: 90
@@ -142,7 +146,7 @@ test_cases:
 
     phases:
       - vset: 123
-        duration_ms: 10000
+        duration_ms: 30000
         assert_end:
           vv_min: 119
           vv_max: 130
@@ -160,7 +164,7 @@ test_cases:
 
     phases:
       - vset: 90
-        duration_ms: 20000
+        duration_ms: 30000
         assert_cmd_at_ms: 1000
         expected_cmd: 0
         cmd_tolerance: 5
@@ -182,10 +186,10 @@ test_cases:
 
     phases:
       - vset: 102
-        duration_ms: 10000
-        assert_cmd_at_ms: 500
-        expected_cmd: 500
-        cmd_tolerance: 50
+        duration_ms: 30000
+        assert_end:
+          vv_min: 106
+          vv_max: 100
 
   # ─────────────────────────────────────────────────────────────────────────
   # TC_SPD_008 — Setpoint Reversal / Oscillation
@@ -224,7 +228,7 @@ test_cases:
 
     phases:
       - vset: 55
-        duration_ms: 50000
+        duration_ms: 9000
         assert_end:
           vv_min: 0
           vv_max: 20

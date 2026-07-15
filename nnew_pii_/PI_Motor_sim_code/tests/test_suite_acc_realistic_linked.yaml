@@ -36,3 +36,81 @@ test_cases:
           lead_speed_kmh: 80
           initial_distance_cm: 2000
         assert_end: {gap_min: 4500, gap_max: 4900}
+
+  - id: TC_ACC_002
+    name: "ACC_LeadProgressiveAccel_80to90"
+    initial_vv: 80
+
+    phases:
+      # Phase 1: steady-state at 80 km/h, gap settled at d_target(80) = 488 cm
+      -
+        duration_ms: 8000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 2500
+        assert_end: {gap_min: 4500, gap_max: 5000}
+
+      # Phase 2: lead accelerates progressively from 80 to 90 km/h over 10 s
+      -
+        duration_ms: 10000
+        radar:
+          lead_present: true
+          lead_speed_kmh_start: 80
+          lead_speed_kmh_end: 90
+         # initial_distance_cm: 4644
+
+      # Phase 3: lead holds 90 km/h, let ACC catch up to the new d_target(90) = 549 cm
+      -
+        duration_ms: 12000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 90
+        assert_end: {gap_min: 5100, gap_max: 5500}
+  - id: TC_ACC_003
+    name: "ACC_LeadProgressiveAccel_80to90"
+    initial_vv: 90
+
+    phases:
+      -
+        duration_ms: 9000
+        radar:
+          lead_present: true
+          lead_speed_kmh_start: 90
+          lead_speed_kmh_end: 70
+          initial_distance_cm: 4900
+        assert_end: {gap_min: 4500, gap_max: 5000}
+      -
+        duration_ms: 12000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 70
+        assert_end: {gap_min: 5100, gap_max: 5500}
+      -
+        duration_ms: 6000
+        radar:
+          lead_present: true
+          lead_speed_kmh_start: 70
+          lead_speed_kmh_end: 60
+          #initial_distance_cm: 5180
+        assert_end: {gap_min: 4500, gap_max: 5000}
+      -
+        duration_ms: 20000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 60
+        assert_end: {gap_min: 5100, gap_max: 5500}
+      -
+        duration_ms: 6000
+        radar:
+          lead_present: true
+          lead_speed_kmh_start: 60
+          lead_speed_kmh_end: 80
+        assert_end: {gap_min: 4500, gap_max: 5000}
+      -
+        duration_ms: 20000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 100
+        assert_end: {gap_min: 5100, gap_max: 5500}
+     

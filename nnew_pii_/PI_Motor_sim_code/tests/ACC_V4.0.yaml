@@ -1,0 +1,86 @@
+
+
+suite:
+  name: "ACC_Validation"
+  version: "2.0"
+  description: >
+    Suite dédiée ACC. Valide l'engagement, le suivi, l'ouverture de gap
+    et la reprise du speedlimiter. Assertions ACC sur gap_cm vs d_target.
+  dut: "STM32F401RETx — acc_controller + speedlimiter"
+
+config:
+  can_interface: "can0"
+  bitrate: 500000
+  loop_period_ms: 10
+  capture_interval_ms: 100
+  reports_dir: "./reports"
+  logs_dir: "./logs"
+
+  motor:
+    tau_ms: 10
+    delay_ms: 1
+    k_drag: 0.0
+
+
+test_cases:
+
+  - id: TC_ACC_001
+    name: "ACC_TooClose_GapOpening"
+    initial_vv: 65
+
+    phases:
+      -
+        duration_ms: 23000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 80
+          initial_distance_cm: 2000
+        assert_end: {gap_min: 5000, gap_max: 5100}
+
+  - id: TC_ACC_002
+    name: "ACC_LeadProgressiveAccel_80to90"
+    initial_vv: 80
+
+    phases:
+      # Phase 1: steady-state at 80 km/h, gap settled at d_target(80) = 488 cm
+      -
+        duration_ms: 14000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 100
+          initial_distance_cm: 5088
+        assert_end: {gap_min: 5600, gap_max: 6100}
+
+      # Phase 2: lead accelerates progressively from 80 to 90 km/h over 10 s
+      -
+        duration_ms: 14000
+        radar:
+          lead_present: true
+          lead_speed_kmh_start: 100
+          lead_speed_kmh_end: 145
+          lead_accel_mps2: 0.28   # ≈1.0 km/h/s, accel douce -> atteint 90 km/h en ~10s (== duration_ms)
+         # initial_distance_cm: 4644
+        assert_end: {gap_min: 6500, gap_max: 6700}
+
+      # Phase 3: lead holds 90 km/h, let ACC catch up to the new d_target(90) = 549 cm
+      -
+        duration_ms: 14000
+        radar:
+          lead_present: true
+          lead_speed_kmh: 145
+        assert_end: {gap_min: 6200, gap_max: 6700}
+  - id: TC_ACC_003
+    name: "ACC_LeadProgressivedeccel_112to90"
+    initial_vv: 145
+
+    phases:
+      -
+        duration_ms: 14000
+        radar:
+          lead_present: true
+          lead_speed_kmh_start: 145
+          lead_speed_kmh_end: 60
+          lead_accel_mps2: -0.62   # ≈-2.2 km/h/s, freinage ferme -> 70 km/h en ~9s (== duration_ms)
+          initial_distance_cm: 6560
+        assert_end: {gap_min: 5900, gap_max: 6000}
+      
